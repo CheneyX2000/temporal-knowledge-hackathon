@@ -124,6 +124,8 @@ FLAGS = {
     "health": re.compile(r"\b(hsa|health savings)\b", re.I),
     "minimax": re.compile(r"\bmini-?max\b", re.I),
 }
+VALUE_CELL_RE = re.compile(r"[\s$\d.,%*\-]*(apr|apy)?\s*\d?|-+|n/?a")
+TIER_CELL_RE = re.compile(r"\d\s*[-]\s*\$?\d|\+\s*$")      # "$10,000 - $24,999.99", "$25,000+"
 METRIC_WORD_RE = re.compile(r"\b(apy|apr|annual percentage|dividend rate|interest rate|rate)\b", re.I)
 LINK_Q_RE = re.compile(r"\b(link|url|website|web ?page|where can i (see|find))\b", re.I)
 RATE_Q_RE = re.compile(r"\b(rates?|aprs?|apys?|yields?|dividends?|interest|percent)\b|%", re.I)
@@ -807,10 +809,14 @@ class TemporalKnowledge:
     def _row_key(u: Unit) -> Optional[str]:
         if not u.cells:
             return None
-        label = " ".join(u.cells[:-1]) if len(u.cells) > 1 else u.cells[0]
+        # the row's *name*: every cell that is not a bare value (rate, points, payment, minimum)
+        label = " ".join(c for c in u.cells if not VALUE_CELL_RE.fullmatch(c.strip().lower())
+                         or TIER_CELL_RE.search(c))
         label = re.sub(r"\b(19|20)\d\d\s*-\s*\d{2,4}\b|\b(19|20)\d\d\b", "", label.lower())
         if u.tier_rank:
             label = f"tier{u.tier_rank} " + label
+        if u.header and u.header[0] == "" and len(u.header) == 2:      # prose fact: name lives in the heading
+            label = (u.context.split(" / ")[-1].lower() + " " + label) if u.context else label
         label = re.sub(r"\d+(\.\d+)?%", "", label)
         label = re.sub(r"[^a-z0-9$,+ ]+", " ", label)
         label = re.sub(r"\s+", " ", label).strip()
@@ -857,7 +863,7 @@ class TemporalKnowledge:
             if not others:
                 continue
             # keep it a single-product conflict: skip keys that map to many distinct values (table drift)
-            if len(others) > 6:
+            if len(others) > 8:
                 continue
             losers = [(v, u, si) for v, u, si in lst if v != win_v]
             stale_pages = {u.url for v, u, si in losers if si == latest}
