@@ -24,7 +24,7 @@ import os
 import re
 from typing import Optional
 
-import concurrent.futures
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -80,7 +80,8 @@ SCHEMA = {
 }
 
 _NUM = re.compile(r"\d[\d,]*(?:\.\d+)?")
-_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+_MAX_IN_FLIGHT = 4          # calls past their deadline may still be running; beyond this, answer locally
+_in_flight = threading.BoundedSemaphore(_MAX_IN_FLIGHT)
 
 
 def _norm_num(s: str) -> str:
@@ -136,12 +137,26 @@ def compose(question: str, as_of_label: str, evidence: list[dict]) -> Optional[d
         blocks.append(f"[{i}] {meta}\n{ev['text']}")
     user = (f"Website as of: {as_of_label}\n\nEvidence:\n\n" + "\n\n".join(blocks) +
             f"\n\nMember question: {question}")
-    # Hard wall-clock deadline (socket timeouts alone are per read, not per request).
-    fut = _POOL.submit(_call_openrouter, user)
-    try:
-        text = fut.result(timeout=TIMEOUT_S)
-    except Exception:
+    # Each call gets its own daemon thread, so a call that overran its deadline never queues the next one
+    # behind it (a shared pool would make every later call time out while it waits for a worker).
+    if not _in_flight.acquire(blocking=False):
         return None
+    box: dict = {}
+
+    def run():
+        try:
+            box["text"] = _call_openrouter(user)
+        except Exception:
+            pass
+        finally:
+            _in_flight.release()
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(TIMEOUT_S)          # hard wall-clock deadline: socket timeouts are per read, not per request
+    if worker.is_alive():
+        return None
+    text = box.get("text")
     try:
         out = json.loads(text or "")
     except Exception:

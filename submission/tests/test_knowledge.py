@@ -174,6 +174,58 @@ class LLMGuardTests(unittest.TestCase):
         finally:
             llm.available, llm._call_openrouter = orig
 
+    def test_slow_call_falls_back_within_deadline(self):
+        import time
+        ev = [{"url": "https://x.test/", "ptype": "news", "pub_date": None, "text": "Lobby 8:30 a.m."}]
+        orig = (llm.available, llm._call_openrouter, llm.TIMEOUT_S)
+        try:
+            llm.available, llm.TIMEOUT_S = (lambda: True), 0.2
+            llm._call_openrouter = lambda user: (time.sleep(1), "{}")[1]
+            t = time.monotonic()
+            self.assertIsNone(llm.compose("hours?", "x", ev))
+            self.assertLess(time.monotonic() - t, 0.5)
+        finally:
+            llm.available, llm._call_openrouter, llm.TIMEOUT_S = orig
+
+
+class FixRegressionTests(unittest.TestCase):
+    def test_row_key_ignores_thousands_separator(self):
+        a = split_page("https://x.test/rates", "R", "| Program | Rate |\n| --- | --- |\n"
+                       "| 30-Year Fixed $100,000 or less | 7.13% |\n", "", [0])
+        b = split_page("https://x.test/rates", "R", "| Program | Rate |\n| --- | --- |\n"
+                       "| 30-Year Fixed $100000 or less | 7.13% |\n", "", [0])
+        rk = TemporalKnowledge._row_key
+        self.assertEqual(rk([u for u in a if u.kind == "row"][0]), rk([u for u in b if u.kind == "row"][0]))
+
+    def test_model_year_tiers_keyed_by_vehicle_family(self):
+        md = ("## Auto Loans\n\n| Model Year | Term | APR |\n| --- | --- | --- |\n"
+              "| 2024-27 Model Year | 60 Months | 5.39% |\n\n"
+              "## ATV, Snowmobile & Jet Ski Loans\n\n| Model Year | Term | APR |\n| --- | --- | --- |\n"
+              "| Model Year 2026-23 | 60 Months | 8.34% |\n")
+        rows = [u for u in split_page("https://x.test/rates", "Rates", md, "", [0]) if u.kind == "row"]
+        keys = {TemporalKnowledge._row_key(u) for u in rows}
+        self.assertEqual(len(keys), 2)
+
+    def test_pub_date_skips_deadlines(self):
+        md = "Offer ends May 31, 2026.\n\nPosted April 2, 2024\n\nSome text."
+        u = split_page("https://x.test/newsroom/a", "A", md, "", [0])[0]
+        self.assertEqual(u.pub_date, "2024-04-02")
+
+    def test_trim_to_shape_keeps_hours_block_only(self):
+        from knowledge.query import ANSWER_TYPES
+        shapes = [ANSWER_TYPES[0][1]]
+        text = ("Lighting cuts costs by more than 35% annually.\nThere are six employees. Branch hours are:\n"
+                "**Lobby**\nMonday-Friday: 8:30 a.m.-5:30 p.m.\nSunday: Closed")
+        out = TemporalKnowledge._trim_to_shape(text, shapes)
+        self.assertIn("8:30 a.m.", out)
+        self.assertIn("Sunday: Closed", out)
+        self.assertNotIn("35%", out)
+
+    def test_ordinal_claims_sentence(self):
+        from knowledge.claims import ordinal_claims
+        text = "Intro. This was the fifth time Forbes recognized Dupaco. Other news."
+        self.assertEqual(ordinal_claims(text), [(" This was the fifth time Forbes recognized Dupaco", "fifth")])
+
 
 if __name__ == "__main__":
     unittest.main()

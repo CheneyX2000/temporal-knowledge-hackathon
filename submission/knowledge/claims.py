@@ -28,8 +28,23 @@ COUNT_LABELS = {"branch": "branch office locations (branches)", "employee": "emp
 ORDINALS = {w: i for i, w in enumerate("first second third fourth fifth sixth seventh eighth ninth tenth".split(), 1)}
 
 
-ORDINAL_CLAIM_RE = re.compile(r"[^.\n]*\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+"
-                              r"(?:time|consecutive year|year in a row|straight year)\b[^.\n]*", re.I)
+ORDINAL_CLAIM_RE = re.compile(r"\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+"
+                              r"(?:time|consecutive year|year in a row|straight year)\b", re.I)
+
+
+def ordinal_claims(text: str):
+    """(sentence, ordinal word) for each sentence stating "the Nth time / consecutive year".
+    Sentences are cut by hand: a regex with a leading [^.]* backtracks quadratically on long pages."""
+    out, end = [], -1
+    for m in ORDINAL_CLAIM_RE.finditer(text):
+        if m.start() < end:
+            out[-1] = (out[-1][0], m.group(1))      # several in one sentence: the last one, as before
+            continue
+        a = max(text.rfind(".", 0, m.start()), text.rfind("\n", 0, m.start())) + 1
+        ends = [i for i in (text.find(".", m.end()), text.find("\n", m.end())) if i != -1]
+        end = min(ends) if ends else len(text)
+        out.append((text[a:end], m.group(1)))
+    return out
 
 
 # words that may follow "how many branches ..." without narrowing the question
@@ -37,6 +52,25 @@ COUNT_FILLER = {stem(w) for w in "dupaco operate operates office offices locatio
 
 
 RECOGNIZERS = ("Forbes", "Newsweek", "Money", "Bankrate", "Iowa Business Record", "Employ Humanity")
+
+
+_REC_RE = re.compile(r"\b(atv|snowmobile|jet ski|boat|rv|recreational|camper|trailer)\b", re.I)
+_AUTO_RE = re.compile(r"\b(auto|motorcycle|vehicle|car)\b", re.I)
+
+
+def _vehicle_family(u: Unit) -> str:
+    """Which model-year table a tiered row belongs to, from its nearest heading (then the page title)."""
+    for s in ((u.context.split(" / ")[-1] if u.context else ""), u.title):
+        if _REC_RE.search(s):
+            return "rec"
+        if _AUTO_RE.search(s):
+            return "auto"
+    return ""
+
+
+def _hyphen_terms(s: str) -> str:
+    """'60 months' -> '60-month', so a topic reads the way members (and keyword lists) write terms."""
+    return re.sub(r"\b(\d+)\s+(month|year)s?\b", r"\1-\2", s)
 
 
 class ConflictsMixin:
@@ -52,10 +86,12 @@ class ConflictsMixin:
                          or TIER_CELL_RE.search(c))
         label = re.sub(r"\b(19|20)\d\d\s*-\s*\d{2,4}\b|\b(19|20)\d\d\b", "", label.lower())
         if u.tier_rank:
-            label = f"tier{u.tier_rank} " + label
+            # rank alone would merge e.g. the auto table's tier 1 with the ATV table's tier 1
+            label = f"tier{u.tier_rank} {_vehicle_family(u)} " + label
         if u.header and u.header[0] == "" and len(u.header) == 2:      # prose fact: name lives in the heading
             label = (u.context.split(" / ")[-1].lower() + " " + label) if u.context else label
         label = re.sub(r"\d+(\.\d+)?%", "", label)
+        label = re.sub(r"(?<=\d),(?=\d{3}\b)", "", label)      # "$100,000" and "$100000" are the same tier
         label = re.sub(r"[^a-z0-9$,+ ]+", " ", label)
         label = re.sub(r"\s+", " ", label).strip()
         return label or None
@@ -65,8 +101,8 @@ class ConflictsMixin:
             return self._conflicts
         if not self.snaps:
             return []
-        # (key, column) -> list of (value, unit, snapshot index)
-        obs = defaultdict(list)
+        # key -> column -> list of (value, unit, snapshot index)
+        obs = defaultdict(lambda: defaultdict(list))
         for si, (_, _, idx) in enumerate(self.snaps):
             for u in idx.units:
                 if u.kind != "row" or u.ptype in ("junk",):
@@ -81,39 +117,61 @@ class ConflictsMixin:
                     col = re.sub(r"[^a-z ]", "", h.lower()).strip()
                     col = "apy" if "yield" in col or "apy" in col else ("apr" if "apr" in col or "annual percentage rate"
                                                                       in col else ("rate" if "rate" in col else col))
-                    obs[(k, col)].append((m.group(1) + "%", u, si))
+                    obs[k][col].append((m.group(1) + "%", u, si))
         latest = len(self.snaps) - 1
         out = []
-        for (k, col), lst in obs.items():
-            vals = {v for v, _, _ in lst}
-            if len(vals) < 2:
-                continue
-            cur = [(v, u) for v, u, si in lst if si == latest]
+        # One conflict per product row: its rate and its APR/APY move together, so they are one
+        # contradiction, not two.
+        for k, cols in obs.items():
+            cur = [u for lst in cols.values() for _, u, si in lst if si == latest]
             if not cur:
                 continue
             # winner: the most authoritative page in the latest snapshot (ties: earliest fetch)
-            cur.sort(key=lambda x: (-x[1].authority, x[1].fetched_at))
-            win_v, win_u = cur[0]
+            win_u = min(cur, key=lambda u: (-u.authority, "business" in u.url.lower(), u.fetched_at))
             if win_u.authority < 0.6:       # no authoritative page states it: nothing to resolve to
                 continue
-            others = sorted({v for v, _, _ in lst if v != win_v}, key=lambda x: float(x[:-1]))
-            # keep it a single-product conflict: skip keys that map to many distinct values (table drift)
-            if len(others) > 8:
+            values, res_parts, losers, changed = [], [], [], []
+            for col in sorted(cols, key=lambda c: (c not in ("rate", ""), c)):
+                lst = cols[col]
+                win_v = next((v for v, u, _ in lst if u is win_u), None)
+                if win_v is None or len({v for v, _, _ in lst}) < 2:
+                    if win_v is not None:
+                        res_parts.append(f"{win_v} {col.upper() if col in ('apr', 'apy') else col}".strip())
+                    continue
+                others = sorted({v for v, _, _ in lst if v != win_v}, key=lambda x: float(x[:-1]))
+                # keep it a single-product conflict: skip columns with many distinct values (table drift)
+                if len(others) > 8:
+                    continue
+                changed.append(col)
+                res_parts.append(f"{win_v} {col.upper() if col in ('apr', 'apy') else col}".strip())
+                values += [v for v in [win_v] + others if v not in values]
+                losers += [(v, u, si) for v, u, si in lst if v != win_v]
+            if not changed:
                 continue
-            losers = [(v, u, si) for v, u, si in lst if v != win_v]
             stale_pages = {u.url for v, u, si in losers if si == latest}
             if stale_pages:
                 reason = (f"{win_u.ptype} page {win_u.url} is authoritative in the latest snapshot "
                           f"({self.snaps[latest][1]}); {', '.join(sorted(stale_pages))[:300]} still show older values")
             else:
                 last_seen = max(si for _, _, si in losers)
-                reason = (f"value changed over time: {', '.join(others)} in earlier snapshots "
-                          f"(last {self.snaps[last_seen][0]}); latest snapshot shows {win_v}")
-            topic = f"{(win_u.context.split(' / ')[-1] + ' - ') if win_u.context else ''}{k} {col}".strip()
+                reason = (f"value changed over time: {', '.join(v for v in values[1:])} in earlier snapshots "
+                          f"(last {self.snaps[last_seen][0]}); latest snapshot shows {', '.join(res_parts)}")
+            ctx = win_u.context.split(" / ")[-1] if win_u.context else ""
+            name = re.sub(r"^tier\d+\s+(auto|rec)?\s*", "", k)
+            if win_u.myear:
+                name = re.sub(r"\bmodel year\b|\band older\b", "", name).strip()
+                yrs = f"{win_u.myear[0]}-{win_u.myear[1]}" if win_u.myear[0] > 1900 else f"{win_u.myear[1]} and older"
+                name = f"{yrs} model year {name}"
+            topic = _hyphen_terms(f"{(ctx + ' - ') if ctx else ''}{name} {'/'.join(changed)}".strip())
+            seen_src = set()
             srcs = [Source(url=win_u.url, snapshot_id=self.snaps[latest][0], quote=win_u.text[:160])]
-            for v, u, si in losers[:6]:
-                srcs.append(Source(url=u.url, snapshot_id=self.snaps[si][0], quote=u.text[:160]))
-            out.append(Conflict(topic=topic, values=[win_v] + others, sources=srcs, resolution=win_v, reason=reason))
+            for v, u, si in losers:
+                if (u.url, v) not in seen_src and len(srcs) < 7:
+                    seen_src.add((u.url, v))
+                    srcs.append(Source(url=u.url, snapshot_id=self.snaps[si][0], quote=u.text[:160]))
+            resolution = ", ".join(res_parts) if len(res_parts) > 1 else values[0]
+            out.append(Conflict(topic=topic, values=values, sources=srcs, resolution=resolution,
+                                reason=reason))
         # The same rate change is often repeated across personal / IRA / business tables: report it once,
         # keeping the personal-product row (members ask about those first).
         def _rank(c):
@@ -153,14 +211,13 @@ class ConflictsMixin:
                         if noun.startswith(key) and lo <= n <= hi:
                             claims[("count", key)].append((n, re.sub(r"\s+", " ", m.group(0).strip()), u, si))
                             break
-                for m in ORDINAL_CLAIM_RE.finditer(u.text):
-                    sent = m.group(0)
+                for sent, ordw in ordinal_claims(u.text):
                     org = next((o for o in RECOGNIZERS if o in sent), None)
                     if org is None:
                         continue
                     what = "employer" if re.search(r"employer|workplace|place to work", sent, re.I) else "credit union"
                     claims[("ordinal", f"{org} {what}")].append(
-                        (ORDINALS[m.group(1).lower()], f"{m.group(1).lower()} time", u, si))
+                        (ORDINALS[ordw.lower()], f"{ordw.lower()} time", u, si))
         # a count must be repeated on at least two pages (boilerplate, not a one-off mention)
         for (kind, key), lst in list(claims.items()):
             if kind == "count":
@@ -224,7 +281,7 @@ class ConflictsMixin:
             return None
         c = self._claim_winner(lst, si)
         u = c[2]
-        sent = next((m.group(0).strip() for m in ORDINAL_CLAIM_RE.finditer(u.text) if org in m.group(0)), c[1])
+        sent = next((t.strip() for t, _ in ordinal_claims(u.text) if org in t), c[1])
         when = f" ({u.pub_date})" if u.pub_date else ""
         return Answer(text=f"According to Dupaco's most recent release on this{when}: {sent}.",
                       sources=[Source(url=u.url, snapshot_id=self.snaps[si][0], quote=sent[:200])],

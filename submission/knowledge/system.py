@@ -15,6 +15,12 @@ from .query import ANSWER_TYPES, LINK_Q_RE, QInfo, analyse
 from .text import PCT_RE, SYN, expand, stem, url_key
 
 
+_DAY_RE = re.compile(r"\b(mon|tues?|wed(nes)?|thu(rs)?|fri|sat(ur)?|sun)(day)?s?\b|\bclosed\b", re.I)
+
+
+_CITY_ZIP_RE = re.compile(r"\b[A-Z][a-z]+,?\s+[A-Z]{2}\s+\d{5}(-\d{4})?\b")
+
+
 REFUSAL_TEXT = ("I'm not able to confirm that from the Dupaco website - it isn't listed there. "
                 "Please contact Dupaco directly for this information.")
 
@@ -55,6 +61,12 @@ class TemporalKnowledge(ConflictsMixin):
         self.snaps.sort(key=lambda s: s[1])
         self._cache.clear()
         self._conflicts = None
+        # Claim tables (counts, recognitions) are built here, not on the first question that needs them.
+        # They are cached by snapshot position, so an out-of-order snapshot invalidates them all.
+        if self.snaps[-1][2] is not idx:
+            self._claims_cache = {}
+        for si in range(len(self.snaps)):
+            self._snapshot_claims(si)
 
     def _mark_stale(self, units: list[Unit]) -> None:
         """Within one snapshot, a table row that repeats a product/tier found on a more authoritative
@@ -233,6 +245,8 @@ class TemporalKnowledge(ConflictsMixin):
                     parts.append(u)
                     break
             text = "\n\n".join(p.text[:700] for p in parts)
+            if shapes:      # hours / phone / address / routing / fee: only the lines that carry it
+                text = self._trim_to_shape(text, shapes) or text
             srcs = [Source(url=best.url, snapshot_id=sid, quote=best.text[:200])]
             keys = {m.group(0) for sh in shapes for m in sh.finditer(best.text)}
             for _, i in scored[1:40]:       # other pages stating the same phone / routing / address
@@ -250,6 +264,37 @@ class TemporalKnowledge(ConflictsMixin):
             return local
         self._llm_ctx = (self._evidence(idx, scored), f"{taken_on} (snapshot {sid})", local)
         return local
+
+    @staticmethod
+    def _trim_to_shape(text: str, shapes) -> str:
+        """Keep the lines that carry the asked-for value (plus their labels: "Lobby", "Sunday: Closed",
+        "Branch hours are:"), so an extractive answer doesn't drag in unrelated numbers from the chunk."""
+        lines = [l.strip() for l in text.split("\n")]
+        hit = lambda l: any(sh.search(l) for sh in shapes)
+        keep = set()
+        for i, l in enumerate(lines):
+            if not hit(l):
+                continue
+            if len(l) > 220:        # a paragraph: keep only the sentence(s) carrying the value
+                sents = [s for s in re.split(r"(?<=[.!?])\s+", l) if hit(s)]
+                lines[i] = " ".join(sents[:2])
+            keep.add(i)
+            j = i - 1           # walk back over labels / "closed" days directly above
+            while j >= 0 and lines[j] and len(lines[j]) <= 60 and not hit(lines[j]) and (
+                    _DAY_RE.search(lines[j]) or re.fullmatch(r"[*#_ ]*[^*#_:]{1,40}[*_ ]*:?", lines[j])
+                    and not re.search(r"\d", lines[j])):
+                keep.add(j)
+                j -= 1
+            if j >= 0 and lines[j].endswith(":"):       # "Branch hours are:"
+                keep.add(j)
+                k = lines[j].rfind(". ")
+                lines[j] = lines[j][k + 2:] if k != -1 else lines[j]
+            k = i + 1           # and "Sunday: Closed" style lines right after
+            while k < len(lines) and lines[k] and len(lines[k]) <= 60 and not hit(lines[k]) and (
+                    _DAY_RE.search(lines[k]) or _CITY_ZIP_RE.search(lines[k])):
+                keep.add(k)
+                k += 1
+        return "\n".join(lines[i] for i in sorted(keep))
 
     @staticmethod
     def _evidence(idx: Index, scored, limit: int = 8) -> list[dict]:

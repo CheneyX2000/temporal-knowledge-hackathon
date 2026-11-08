@@ -9,19 +9,19 @@
   - Set `OPENROUTER_API_KEY`. The default model is `deepseek/deepseek-v4.1-flash`, and a whole
     public-eval run costs about $0.002–0.006.
   - Without a key, or on any error, the system uses the local answer.
-- Ingest of the five snapshots takes about 5 s. Local answers take about 20 ms. Checked on
+- Ingest of the five snapshots takes about 6 s. Local answers take about 20 ms (p95 under 0.2 s). Checked on
   Python 3.11 from a fresh clone.
 
 ```bash
 python harness/run_eval.py --submission submission --eval eval/public_eval.jsonl   # score
-python -m unittest discover -s submission/tests                                     # 15 unit tests
+python -m unittest discover -s submission/tests                                     # 21 unit tests
 ```
 
 | Question set | Local only | With LLM (DeepSeek) | Notes |
 |---|---|---|---|
-| Public (40) | 0.836 | **0.85–0.87** (p95 ≈ 2.1 s) | The starter scores 0.09. The LLM range covers separate runs. |
+| Public (40) | 0.836 | **0.85–0.87** (p95 ≈ 2.1 s) | The starter scores 0.09. The LLM range covers separate runs and was measured before the latest fixes. |
 | Selftest (with conflict gold) | 1.00 | — | Conflicts F1 1.0. |
-| `dev/blind2_eval.jsonl` (22) | **0.864** | 0.864 | Written last and run once, with no tuning afterwards. |
+| `dev/blind2_eval.jsonl` (22) | 0.864 → **0.909** | 0.864 | Written last and run once with no tuning. The later rise came from general fixes (publish dates, trimmed prose answers), not from tuning on this set. |
 | `dev/blind_eval.jsonl` (25) | 0.88 on its first run | 1.00 | Its misses were then fixed, so it is no longer blind. |
 | `dev/holdout_eval.jsonl` (60) | 0.68 → 0.98 | 0.98 | Used for tuning, so this number is optimistic. |
 
@@ -92,14 +92,18 @@ products and tiers, `as_of` dates, refusals, fees and branches.
 
 ## Conflicts
 
-`conflicts()` returns 56 conflicts. Each carries the competing values, their source pages, the
-resolution and a reason.
+`conflicts()` returns 33 conflicts. Each carries the competing values, their source pages, the
+resolution and a reason. Precision counts as much as recall in the F1, so the list is deduplicated.
 
 1. **Rate facts.** The same row key with different values is reported, either across pages of the
    latest snapshot (a stale copy) or across snapshots of the same page (a change).
    - Winner: the most authoritative page in the latest snapshot.
-   - A change repeated across the personal, IRA and business tables is reported once, which keeps
-     precision up.
+   - One conflict per product row: its rate and its APR/APY move together, so they form a single
+     entry, and the resolution names both values (e.g. "3.37% rate, 3.40% APY").
+   - Row keys ignore thousands separators ("$100,000" = "$100000"), and model-year tiers are keyed by
+     vehicle family as well as rank, so the ATV table's tier 1 is never merged with the auto table's.
+   - A change repeated across the personal, IRA and business tables is reported once.
+   - Topics spell terms the way members do ("60-month") and name the current model-year range.
 2. **Organisation figures in prose**, under the newest-dated rule above. Example: 22 branch office
    locations (May 2026) beats 23, 24, 20 and 19 from older releases.
 
@@ -111,12 +115,16 @@ resolution and a reason.
   - Sending every general question to the LLM was tried first. It was slower and lost a tier
     question.
 - **Grounding guard.** Every number in the LLM answer must appear in the evidence or the question;
-  otherwise the local answer is used. The LLM never sees stale values, so it cannot repeat them.
-  The guard is covered by a unit test.
+  otherwise the local answer is used. Stale table rows and expired offers are removed from the
+  evidence, but older dated prose (an old press release) can still reach it, with its publish date;
+  the prompt tells it to prefer the newest item. The guard checks that numbers exist, not that the
+  right tier was chosen. It is covered by a unit test.
 - **Consistency and speed.**
   - Structured JSON output, cached per (question, as_of), so repeats are identical.
   - Hard 1.9 s wall-clock deadline (`KS_LLM_TIMEOUT`); a slower call falls back to the local
-    answer, which keeps p95 at about 2 s.
+    answer, which keeps p95 at about 2 s. Each call runs in its own thread, so a call that overran
+    its deadline never makes the next one wait; past 4 calls in flight the local answer is used.
+  - The cache is per exact question, so two rewordings are two separate calls.
   - Answers can differ between separate runs.
 - **Settings.** `KS_LLM=0` disables the layer. `KS_LLM_MODEL` and `KS_LLM_EFFORT` (default `low`)
   tune it. Requests use a strict json_schema, `reasoning.exclude`, and
@@ -148,7 +156,9 @@ resolution and a reason.
 ## Known limitations
 
 - Ambiguous product words without context (e.g. "SUV" counts as an unknown word, and is refused).
-- Prose answers in local mode are extractive chunks. The LLM layer fixes most of that.
+- Prose answers in local mode are extractive chunks. Hours, phone, address, routing-number and fee
+  answers are trimmed to the lines carrying the value; other prose is not, and the LLM layer
+  handles most of that.
 - Conflict precision against the hidden gold is unknown, since no gold is available locally.
 - Questions whose answer is spread across several pages (e.g. "do all branches keep the same
   hours?") are only partially answered.

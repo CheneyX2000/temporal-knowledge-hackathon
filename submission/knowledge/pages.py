@@ -48,6 +48,10 @@ EXPIRY_RE = re.compile(r"\b(?:offer|promotion|promo|special|rate)?\s*(?:ends?|en
                        r"valid until|good through|available through)\s*(?:on\s*)?" + _DATE_ANY, re.I)
 
 
+_DEADLINE_RE = re.compile(r"\b(ends?|ended|expires?|expired|through|thru|until|by|before|deadline|due|"
+                          r"valid|starting|starts?|begins?|effective|on or after)\W*$", re.I)
+
+
 ENDED_RE = re.compile(r"\b(offer|promotion|promo) (has )?(ended|expired)\b|\bno longer available\b", re.I)
 
 
@@ -112,7 +116,9 @@ def split_page(url: str, title: str, md: str, fetched_at: str, table_counter: li
     ptype, auth = page_type(url)
     md = norm_text(md)
     head = md[:600]
-    dm = DATE_RE.search(head)
+    # the publish date is the first date in the page head that isn't a deadline ("Offer ends May 31, 2026")
+    dm = next((m for m in DATE_RE.finditer(head) if not _DEADLINE_RE.search(head[max(0, m.start() - 40):m.start()])),
+              None)
     pub = f"{dm.group(3)}-{MONTHS[dm.group(1).lower()]:02d}-{int(dm.group(2)):02d}" if dm else None
     units: list[Unit] = []
     lines = md.split("\n")
