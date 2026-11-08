@@ -22,7 +22,6 @@ REFUSAL_TEXT = ("I'm not able to confirm that from the Dupaco website - it isn't
 class TemporalKnowledge(ConflictsMixin):
     def __init__(self):
         self.snaps: list[tuple[str, str, Index]] = []          # (snapshot_id, taken_on, index)
-        self.rows_by_snap: list[list[Unit]] = []
         self._cache: dict = {}
         self._conflicts = None
         self._known_pages: dict = {}
@@ -167,7 +166,7 @@ class TemporalKnowledge(ConflictsMixin):
         for i, s in raw.items():
             u = idx.units[i]
             mult = u.authority
-            cov_i = idx.coverage(i, qi.content) if qi.content else 1.0
+            cov_i = idx.coverage(i, qi.content, qi.names) if qi.content else 1.0
             mult *= cov_i ** 2
             if u.kind == "row":
                 fit = self._row_fit(u, qi)
@@ -205,13 +204,12 @@ class TemporalKnowledge(ConflictsMixin):
         if not scored:
             return Answer(text=REFUSAL_TEXT, confident=False)
         scored.sort(key=lambda x: (-x[0], x[1]))
-        self._last_scored = (idx, scored[:8])      # kept for debugging / inspection
         best_s, best_i = scored[0]
         best = idx.units[best_i]
 
         # Honesty gate: the question's words -- above all its rare, distinguishing ones (a branch
         # name, "7/1 ARM") -- must be on the unit we answer from; otherwise say it isn't listed.
-        cov = idx.coverage(best_i, qi.content) if qi.content else 1.0
+        cov = idx.coverage(best_i, qi.content, qi.names) if qi.content else 1.0
         tf = idx.docs[best_i][0]
         names = {stem(w.lower()) for w in re.findall(r"(?<![.?!]\s)(?<!^)\b([A-Z][a-z]{2,})\b", question)}
         missing_rare = [t for t in qi.content if t in names and idx.idf.get(t, 0) >= 6.0 and t not in tf

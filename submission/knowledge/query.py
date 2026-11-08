@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 import re
 
-from .text import FLAGS, GENERIC_S, MONEY_RE, content_terms, money_value, norm_question, norm_text, terms_months, tokens
+from .text import FLAGS, GENERIC_S, MONEY_RE, content_terms, money_value, norm_question, norm_text, stem, terms_months, tokens
 
 
 # Answer-type detection: what the answer must *look like* for a given kind of question.
@@ -44,6 +44,7 @@ class QInfo:
     is_rate: bool
     is_list: bool
     specific: bool
+    names: frozenset = frozenset()     # stems of capitalised names in the question (brands, places)
 
 
 def analyse(q: str) -> QInfo:
@@ -67,4 +68,5 @@ def analyse(q: str) -> QInfo:
     content = [t for t in content_terms(negated) if t not in GENERIC_S and t not in ("month", "year")]
     if "ira" in flags:      # IRA rows on the rate sheet are term certificates without saying so
         content = [t for t in content if t not in ("certif", "cd")]
-    return QInfo(qn, terms, content, months, my, amounts, flags, is_rate, is_list, specific)
+    names = frozenset(stem(w.lower()) for w in re.findall(r"(?<!^)(?<![.?!]\s)\b([A-Z][a-z]{2,})\b", q))
+    return QInfo(qn, terms, content, months, my, amounts, flags, is_rate, is_list, specific, names)
