@@ -755,9 +755,10 @@ class TemporalKnowledge:
         if as_of:
             note = f"Answered from the website as it stood on {taken_on} (snapshot {sid})."
         local = Answer(text=text, sources=srcs, confident=True, conflict_note=note)
-        # Exact single-row rate lookups are already precise; the LLM composes everything else
-        # (prose answers, lists, general questions) from the same current, non-stale evidence.
-        if best.kind == "row" and qi.specific and not qi.is_list:
+        # Answers read off rate tables (single rows and lists) are already exact and fast, so they stay
+        # local. The LLM only composes prose answers (hours, programs, eligibility...), where
+        # extractive chunks are weakest, from the same current, non-stale evidence.
+        if best.kind == "row":
             return local
         evidence = self._evidence(idx, scored, rows if best.kind == "row" else [])
         self._llm_ctx = (evidence, f"{taken_on} (snapshot {sid})", local)

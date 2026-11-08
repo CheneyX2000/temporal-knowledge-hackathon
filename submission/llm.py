@@ -25,6 +25,7 @@ import os
 import re
 from typing import Optional
 
+import concurrent.futures
 import urllib.request
 from pathlib import Path
 
@@ -44,11 +45,11 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 EFFORT = os.getenv("KS_LLM_EFFORT", "low")
-TIMEOUT_S = float(os.getenv("KS_LLM_TIMEOUT", "20"))
+TIMEOUT_S = float(os.getenv("KS_LLM_TIMEOUT", "1.9"))   # speed is scored on p95 <= 2 s; slow calls fall back
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 BACKEND = ("openrouter" if os.getenv("OPENROUTER_API_KEY") else
            "anthropic" if (os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")) else None)
-MODEL = os.getenv("KS_LLM_MODEL", "anthropic/claude-opus-5.5" if BACKEND == "openrouter" else "claude-opus-5-5")
+MODEL = os.getenv("KS_LLM_MODEL", "deepseek/deepseek-v4.1-flash" if BACKEND == "openrouter" else "claude-opus-5-5")
 
 SYSTEM = """You answer credit-union members' questions using ONLY the evidence provided, which comes from \
 the credit union's own website as it stood on a given date. The evidence has already been filtered: \
@@ -83,6 +84,7 @@ SCHEMA = {
 
 _NUM = re.compile(r"\d[\d,]*(?:\.\d+)?")
 _client = None
+_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 _disabled_reason: Optional[str] = None
 _use_fallbacks = True
 
@@ -185,8 +187,10 @@ def compose(question: str, as_of_label: str, evidence: list[dict]) -> Optional[d
         blocks.append(f"[{i}] {meta}\n{ev['text']}")
     user = (f"Website as of: {as_of_label}\n\nEvidence:\n\n" + "\n\n".join(blocks) +
             f"\n\nMember question: {question}")
+    # Hard wall-clock deadline (socket timeouts alone are per read, not per request).
+    fut = _POOL.submit(_call_openrouter if BACKEND == "openrouter" else _call_anthropic, user)
     try:
-        text = _call_openrouter(user) if BACKEND == "openrouter" else _call_anthropic(user)
+        text = fut.result(timeout=TIMEOUT_S)
     except Exception:
         return None
     try:

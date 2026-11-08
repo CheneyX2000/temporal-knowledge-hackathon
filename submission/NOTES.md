@@ -5,7 +5,7 @@ An optional LLM layer composes answers from the same filtered evidence (see "LLM
 uses a **paid API**:
 
 - `OPENROUTER_API_KEY` (preferred). Plain HTTPS from the standard library. Default model is
-  `anthropic/claude-opus-5.5`.
+  `deepseek/deepseek-v4.1-flash`, which is fast and cheap: a full public-eval run costs about $0.006.
 - `ANTHROPIC_API_KEY`. Requires the `anthropic` package (in `requirements.txt`). Default model is
   `claude-opus-5-5`.
 
@@ -16,7 +16,16 @@ error, the system falls back to the local answer. Ingest of all five snapshots t
 python harness/run_eval.py --submission submission --eval eval/public_eval.jsonl
 ```
 
-Public set: **0.81** (starter: 0.09). Bundled selftest (with conflict gold): **1.00**.
+Public set (starter scores 0.09):
+
+| Mode | Accuracy | p95 latency | Final score |
+|---|---|---|---|
+| Local only | 0.81 | 0.1 s | **0.81** |
+| With LLM (DeepSeek V4.1 Flash) | 0.85 | 2.0 s | **0.85** |
+
+Bundled selftest (with conflict gold): **1.00**.
+
+LLM answers are not deterministic across separate runs. Within a run they are cached.
 
 ## How it works
 
@@ -73,14 +82,18 @@ The local pipeline still decides *what is true now*: it picks the snapshot, drop
 expired offers, and refuses when the honesty gate fails. The LLM only *phrases* the answer, under
 these rules:
 
-- **Routing.** Exact single-row rate lookups (e.g. "60-month auto, 2025 model year") stay local
-  because they are already precise. Prose, list and general questions go to the LLM with the top 8
+- **Routing.** Answers read from rate tables stay local, both single rows and lists, because they
+  are already exact. Only prose answers (hours, programs, eligibility…) go to the LLM, with the top 8
   **non-stale** evidence units: URL, page type and publish date, ordered by relevance.
+  - Routing every non-specific question to the LLM was tried first. It was slower and lost a
+    tier-disambiguation question.
 - **Grounding guard.** Every number in the LLM answer must appear in the evidence or in the
   question. Otherwise the local answer is used. The LLM never sees stale values, so it cannot
   repeat them.
 - **Output.** Structured JSON output: `answer`, `confident`, `source_urls`, `conflict_note`.
-  Answers are cached per (question, as_of) for repeat consistency. The request uses a 20 s timeout.
+  Answers are cached per (question, as_of) for repeat consistency.
+- **Deadline.** Each LLM call has a hard **1.9 s** wall-clock deadline (`KS_LLM_TIMEOUT`). A slower
+  call falls back to the local answer, which keeps p95 latency at about 2 s.
   - OpenRouter: `response_format` json_schema (strict), `reasoning.effort` with `exclude: true`,
     and `provider.require_parameters` so the request only goes to providers that honour the schema.
   - Anthropic SDK: one retry, plus server-side refusal fallbacks (`fallbacks: "default"`) when the
