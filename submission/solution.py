@@ -39,6 +39,9 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import llm  # noqa: E402  (optional LLM composer; inert without credentials)
+
 # ---------------------------------------------------------------------------------------------
 # Contract types: use the harness's classes when available, otherwise identical local copies
 # (the harness accepts any object with the same fields).
@@ -555,6 +558,7 @@ class TemporalKnowledge:
         self._cache: dict = {}
         self._conflicts = None
         self._known_pages: dict = {}
+        self._llm_ctx = None
 
     # ---------------------------------------------------------------- ingest
     def ingest(self, snapshot) -> None:
@@ -652,7 +656,16 @@ class TemporalKnowledge:
         key = (question.strip().lower(), as_of)
         if key in self._cache:
             return self._cache[key]
+        self._llm_ctx = None
         ans = self._answer(question, as_of)
+        if self._llm_ctx is not None:
+            evidence, label, local = self._llm_ctx
+            out = llm.compose(question, label, evidence)
+            if out is not None:
+                srcs = [Source(url=u, snapshot_id=local.sources[0].snapshot_id if local.sources else None)
+                        for u in out["source_urls"]] or local.sources
+                ans = Answer(text=out["answer"], sources=srcs, confident=bool(out["confident"]),
+                             conflict_note=(out.get("conflict_note") or None) or local.conflict_note)
         self._cache[key] = ans
         return ans
 
@@ -741,7 +754,34 @@ class TemporalKnowledge:
         note = None
         if as_of:
             note = f"Answered from the website as it stood on {taken_on} (snapshot {sid})."
-        return Answer(text=text, sources=srcs, confident=True, conflict_note=note)
+        local = Answer(text=text, sources=srcs, confident=True, conflict_note=note)
+        # Exact single-row rate lookups are already precise; the LLM composes everything else
+        # (prose answers, lists, general questions) from the same current, non-stale evidence.
+        if best.kind == "row" and qi.specific and not qi.is_list:
+            return local
+        evidence = self._evidence(idx, scored, rows if best.kind == "row" else [])
+        self._llm_ctx = (evidence, f"{taken_on} (snapshot {sid})", local)
+        return local
+
+    def _evidence(self, idx: Index, scored, rows: list[Unit], limit: int = 8) -> list[dict]:
+        """The top non-stale units, as plain dicts for the LLM (stale copies are never shown to it)."""
+        out, seen = [], set()
+        if rows:
+            txt = "\n".join(f"- {r.text}" for r in rows)
+            ctx = rows[0].context.split(" / ")[-1] if rows[0].context else rows[0].title
+            out.append({"url": rows[0].url, "ptype": rows[0].ptype, "pub_date": rows[0].pub_date,
+                        "text": f"{ctx}:\n{txt}"})
+            seen.update(r.text for r in rows)
+        for s, i in scored:
+            if len(out) >= limit:
+                break
+            u = idx.units[i]
+            if u.stale or u.text in seen:
+                continue
+            seen.add(u.text)
+            text = (f"{u.context.split(' / ')[-1]}: {u.text}" if u.kind == "row" and u.context else u.text)[:900]
+            out.append({"url": u.url, "ptype": u.ptype, "pub_date": u.pub_date, "text": text})
+        return out
 
     def _row_sources(self, idx: Index, rows: list[Unit], sid: str) -> list:
         """Cite the row's page plus other authoritative pages that show the same row with the same values."""

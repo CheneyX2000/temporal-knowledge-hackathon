@@ -1,7 +1,10 @@
 # NOTES — temporal knowledge system (MVP)
 
-**API keys: none.** Pure Python standard library, deterministic, no network calls.
-`requirements.txt` is intentionally empty. Ingest of all five snapshots takes ~5 s; answers take ~20 ms.
+**API keys: optional.** The core is pure Python standard library: deterministic and offline.
+With `ANTHROPIC_API_KEY` set and `anthropic` installed (`requirements.txt`), an optional LLM layer
+composes answers from the same filtered evidence (see "LLM layer" below). This is a **paid API**
+(Claude, default model `claude-opus-5-5`). Without a key, or on any API error, the system falls back to
+the local answer. Ingest of all five snapshots takes ~5 s; local answers take ~20 ms.
 
 ```bash
 python harness/run_eval.py --submission submission --eval eval/public_eval.jsonl
@@ -58,12 +61,30 @@ pages in the latest snapshot (a stale copy), and across snapshots of the same pa
 changed). The winner is the value on the most authoritative page in the latest snapshot. The reason
 field names that page and the stale pages, or says the value changed over time. 72 are reported.
 
+## LLM layer (optional, `llm.py`)
+
+The local pipeline still decides *what is true now*: it picks the snapshot, drops stale copies and
+expired offers, and refuses when the honesty gate fails. The LLM only *phrases* the answer, under
+these rules:
+
+- **Routing.** Exact single-row rate lookups (e.g. "60-month auto, 2025 model year") stay local
+  because they are already precise. Prose, list and general questions go to the LLM with the top 8
+  **non-stale** evidence units: URL, page type and publish date, ordered by relevance.
+- **Grounding guard.** Every number in the LLM answer must appear in the evidence or in the
+  question. Otherwise the local answer is used. The LLM never sees stale values, so it cannot
+  repeat them.
+- **Output.** Structured JSON output: `answer`, `confident`, `source_urls`, `conflict_note`.
+  Answers are cached per (question, as_of) for repeat consistency. The request uses a 20 s timeout,
+  one retry, and server-side refusal fallbacks (`fallbacks: "default"`) when the account supports
+  them.
+- **Settings.** `KS_LLM=0` disables the layer, `KS_LLM_MODEL` changes the model and
+  `KS_LLM_EFFORT` changes the effort (default `low`). A faster model lowers latency for the speed
+  score.
+
 ## Known limitations / next steps
 
 - Conflicts cover numeric rate facts only. Prose facts such as branch counts (22 vs 24) and Forbes
   recognitions (fourth vs fifth) are answered with recency rules but not listed as conflicts.
 - Lexical retrieval misses some paraphrases. The 6-character prefix stemming occasionally collides
   ("officer" matches "office").
-- Answers are extractive (row text or a page chunk), not composed. An optional LLM layer could
-  phrase answers over the same retrieved, staleness-filtered evidence. It would be cached for
-  consistency and fall back to this path when no key is set.
+- Without the LLM layer, answers are extractive: the row text or a page chunk.
