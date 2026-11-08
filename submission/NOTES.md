@@ -30,11 +30,18 @@ were checked by hand against the snapshots:
 
 | Set | Questions | Score | How it was used |
 |---|---|---|---|
-| `dev/holdout_eval.jsonl` | 60 | 0.68 → 0.93 | Paraphrases, other tiers and products, `as_of`, refusals, fees, branches. Misses drove the fixes, so the final number is optimistic. |
-| `dev/blind_eval.jsonl` | 25 | **0.88** | Written after the fixes and run once, with no tuning afterwards. No stale-value trap hits. |
+| `dev/holdout_eval.jsonl` | 60 | 0.68 → 0.95 | Paraphrases, other tiers and products, `as_of`, refusals, fees, branches. Misses drove the fixes, so the final number is optimistic. |
+| `dev/blind_eval.jsonl` | 25 | **0.88** first run → 0.96 | Written after the holdout fixes. **0.88 on its first run, with no stale-value trap hits, is the honest generalization estimate.** Its over-refusals were then fixed, so the set is no longer blind. |
 
-The remaining blind misses: over-refusal when an older snapshot's table lacks a heading that names
-the product (2), and the mailing address (1).
+The over-refusal fix applies two rules:
+
+- A table's own footnotes and call-to-action link text vouch for what the table is. Example: an
+  older snapshot's certificate table had no heading naming it. These footnotes count toward
+  coverage only, never toward ranking.
+- A query term matches by prefix ("intro" ~ "introductory").
+
+Known misses: "2026 Honda" (ambiguous: Honda also makes ATVs), IRA certificate wording, a fee
+question that lists all three wire fees, and the mailing address.
 
 LLM answers are not deterministic across separate runs. Within a run they are cached.
 
