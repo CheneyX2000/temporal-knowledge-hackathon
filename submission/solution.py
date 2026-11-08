@@ -134,6 +134,18 @@ LINK_Q_RE = re.compile(r"\b(link|url|website|web ?page|where can i (see|find))\b
 RATE_Q_RE = re.compile(r"\b(rates?|aprs?|apys?|yields?|dividends?|interest|percent)\b|%", re.I)
 LIST_Q_RE = re.compile(r"\b(rates|what .* (do you|does dupaco) offer|all|list|options|cards|"
                        r"certificates|accounts|loans)\b", re.I)
+# Prose claims about the organisation that drift over time (checked for conflicts).
+COUNT_CLAIM_RE = re.compile(r"\b(nearly|more than|over|about|approximately|almost)?\s*(\d{1,3}(?:,\d{3})*|\d+)\+?\s+"
+                            r"(branch office locations|branch offices|branches|employees|members|counties)\b", re.I)
+COUNT_NOUNS = {"branch": (5, 200), "employee": (100, 100_000), "member": (10_000, 10_000_000),
+               "count": (10, 1000)}      # noun prefix -> plausible organisation-level range
+COUNT_LABELS = {"branch": "branch office locations (branches)", "employee": "employees",
+                "member": "members", "count": "charter-area counties"}
+ORDINALS = {w: i for i, w in enumerate("first second third fourth fifth sixth seventh eighth ninth tenth".split(), 1)}
+ORDINAL_CLAIM_RE = re.compile(r"[^.\n]*\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+"
+                              r"(?:time|consecutive year|year in a row|straight year)\b[^.\n]*", re.I)
+RECOGNIZERS = ("Forbes", "Newsweek", "Money", "Bankrate", "Iowa Business Record", "Employ Humanity")
+
 REFUSAL_TEXT = ("I'm not able to confirm that from the Dupaco website - it isn't listed there. "
                 "Please contact Dupaco directly for this information.")
 
@@ -920,8 +932,91 @@ class TemporalKnowledge:
             for v, u, si in losers[:6]:
                 srcs.append(Source(url=u.url, snapshot_id=self.snaps[si][0], quote=u.text[:160]))
             out.append(Conflict(topic=topic, values=[win_v] + others, sources=srcs, resolution=win_v, reason=reason))
-        out.sort(key=lambda c: c.topic)
+        # The same rate change is often repeated across personal / IRA / business tables: report it once,
+        # keeping the personal-product row (members ask about those first).
+        def _rank(c):
+            t = c.topic.lower()
+            return (("ira" in t or "roth" in t or "traditional" in t) + ("business" in t), c.topic)
+        merged, seen_vals = [], set()
+        for c in sorted(out, key=_rank):
+            sig = (tuple(sorted(c.values)), c.resolution)
+            if sig in seen_vals:
+                continue
+            seen_vals.add(sig)
+            merged.append(c)
+        out = merged
+        out.extend(self._prose_conflicts())
+        out.sort(key=_rank)
         self._conflicts = out
+        return out
+
+    def _prose_conflicts(self) -> list:
+        """Organisation-level facts stated in prose ("22 branch office locations", "the fifth time Forbes
+        recognized Dupaco") that different pages or snapshots state differently. These facts change over
+        time, so the newest *dated* statement in the latest snapshot wins; undated copy only counts when
+        nothing dated exists."""
+        claims = defaultdict(list)       # key -> [(value, display, unit, snapshot index)]
+        for si, (sid, taken, idx) in enumerate(self.snaps):
+            for u in idx.units:
+                if u.kind != "text" or u.ptype == "junk":
+                    continue
+                for m in COUNT_CLAIM_RE.finditer(u.text):
+                    # only statements about the organisation itself ("It has ... 22 branch office
+                    # locations", "Dupaco serves ...") -- not a single branch, state or program
+                    a = u.text.rfind(".", 0, m.start()) + 1
+                    sent = u.text[a:m.end()]
+                    if not re.search(r"\bDupaco\b|^\s*It\s", sent):
+                        continue
+                    n = int(m.group(2).replace(",", ""))
+                    noun = m.group(3).lower()
+                    for key, (lo, hi) in COUNT_NOUNS.items():
+                        if noun.startswith(key) and lo <= n <= hi:
+                            disp = re.sub(r"\s+", " ", m.group(0).strip())
+                            claims[("count", key)].append((n, disp, u, si))
+                            break
+                for m in ORDINAL_CLAIM_RE.finditer(u.text):
+                    sent = m.group(0)
+                    org = next((o for o in RECOGNIZERS if o in sent), None)
+                    if org is None:
+                        continue
+                    n = ORDINALS[m.group(1).lower()]
+                    what = "employer" if re.search(r"employer|workplace|place to work", sent, re.I) else "credit union"
+                    org = f"{org} {what}"
+                    claims[("ordinal", org)].append((n, f"{m.group(1).lower()} time", u, si))
+        latest = len(self.snaps) - 1
+        out = []
+        for (kind, key), lst in claims.items():
+            # a figure must be repeated on at least two pages to count (boilerplate, not a one-off)
+            pages = defaultdict(set)
+            for v, _, u, _ in lst:
+                pages[v].add(u.url)
+            if kind == "count":
+                lst = [c for c in lst if len(pages[c[0]]) >= 2]
+            if len({v for v, _, _, _ in lst}) < 2:
+                continue
+            cur = [c for c in lst if c[3] == latest] or lst
+            dated = [c for c in cur if c[2].pub_date]
+            pool = dated or cur
+            newest = max(c[2].pub_date or "" for c in pool)
+            top = [c for c in pool if (c[2].pub_date or "") == newest]
+            win = Counter(v for v, _, _, _ in top).most_common(1)[0][0]
+            win_c = next(c for c in top if c[0] == win)
+            vals, seen = [win_c[1]], {win}
+            for v, disp, u, si in sorted(lst, key=lambda c: c[2].pub_date or "", reverse=True):
+                if v not in seen and len(vals) < 6:
+                    seen.add(v)
+                    vals.append(disp)
+            if kind == "count":
+                topic = "number of Dupaco " + COUNT_LABELS[key]
+            else:
+                topic = f"how many times {key.split()[0]} recognized Dupaco ({key.split(' ', 1)[1]} ranking)"
+            srcs = [Source(url=win_c[2].url, snapshot_id=self.snaps[win_c[3]][0], quote=win_c[1])]
+            for v, disp, u, si in lst:
+                if v != win and all(x.url != u.url for x in srcs) and len(srcs) < 6:
+                    srcs.append(Source(url=u.url, snapshot_id=self.snaps[si][0], quote=disp))
+            reason = (f"newest dated statement ({win_c[2].pub_date or 'undated'}, {win_c[2].url}) in the latest "
+                      f"snapshot says {win_c[1]}; older articles and copy still carry earlier figures")
+            out.append(Conflict(topic=topic, values=vals, sources=srcs, resolution=win_c[1], reason=reason))
         return out
 
 

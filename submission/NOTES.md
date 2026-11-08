@@ -71,10 +71,23 @@ LLM answers are not deterministic across separate runs. Within a run they are ca
 
 ## Conflicts
 
-Rate rows that share a key but show different values are reported as conflicts in two cases: across
-pages in the latest snapshot (a stale copy), and across snapshots of the same page (the value
-changed). The winner is the value on the most authoritative page in the latest snapshot. The reason
-field names that page and the stale pages, or says the value changed over time. 72 are reported.
+`conflicts()` reports two kinds of conflict (58 in total on the five snapshots).
+
+1. **Rate facts.** Table rows and rate-bearing lines are keyed by product name, term and tier.
+   Model-year tiers are keyed by their rank. A conflict is reported when the same key shows
+   different values, either across pages of the latest snapshot (a stale copy) or across snapshots
+   of the same page (the value changed).
+   - Winner: the value on the most authoritative page in the latest snapshot.
+   - A change repeated across the personal, IRA and business tables is reported once.
+2. **Prose facts about the organisation.** These are figures that drift over time:
+   - branch office locations, employees, members and charter-area counties, when stated about
+     Dupaco itself and repeated on at least two pages;
+   - "the Nth time Forbes recognized Dupaco", kept separate per ranking (credit union vs.
+     employer).
+   - Winner: the newest dated statement in the latest snapshot. Example: 22 branch office locations
+     (May 2026) beats 23, 24, 20 and 19 from older releases.
+
+Each conflict carries the competing values, their source pages, the resolution and a reason.
 
 ## LLM layer (optional, `llm.py`)
 
@@ -104,8 +117,10 @@ these rules:
 
 ## Known limitations / next steps
 
-- Conflicts cover numeric rate facts only. Prose facts such as branch counts (22 vs 24) and Forbes
-  recognitions (fourth vs fifth) are answered with recency rules but not listed as conflicts.
+- Prose conflicts cover a fixed set of organisation-level figures (branches, employees, members,
+  counties, recognition counts). Other prose facts that change, such as hours or program amounts,
+  are handled by recency when answering but are not listed as conflicts.
+- No official conflict gold is available locally. Precision against the hidden gold is unknown.
 - Lexical retrieval misses some paraphrases. The 6-character prefix stemming occasionally collides
   ("officer" matches "office").
 - Without the LLM layer, answers are extractive: the row text or a page chunk.
