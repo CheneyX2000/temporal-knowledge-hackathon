@@ -1,32 +1,9 @@
 """
-Temporal knowledge system for the credit-union snapshots (standard library only; optional LLM layer).
+Knowledge system over five website snapshots that answers with what is true *now* (or as of a date),
+cites its sources, lists the site's contradictions, and says "I don't know" when the site doesn't say.
 
-Pipeline
---------
-ingest(snapshot)
-    * every page is typed by its URL (rate sheet, product page, landing page, calculator,
-      PDF, newsroom, blog) which gives it an *authority* weight
-    * markdown tables are split into one unit per row, keeping the table heading and the
-      column headers, so a row like "2024-27 Model Year | 60 Months | 5.39% APR" is a fact
-    * prose is split into short chunks
-    * each snapshot gets its own BM25 index, so `as_of` questions can be answered from the
-      website exactly as it stood on that date
-
-answer(question, as_of)
-    1. pick the snapshot (newest one taken on/before `as_of`, else the latest)
-    2. parse qualifiers from the question: term (60-month / 30-year), model year, dollar
-       amounts (balance / loan tiers), jumbo / IRA / business / refinance / intro flags
-    3. score units = BM25 x page authority x qualifier fit; rows whose qualifiers clash
-       with the question (wrong term, wrong model-year range, wrong balance tier) are dropped
-    4. answer with the best row (specific question) or the rows of the best table(s)
-       (general question), or with a prose chunk for non-rate questions
-    5. refuse ("isn't listed, please contact us") when the question's distinguishing words
-       are not covered by any authoritative unit
-
-conflicts()
-    Table rows are keyed by (product family, normalised row label, column). The same key with
-    different values -- across pages of the latest snapshot or across snapshots of the same
-    page -- is a conflict; the winner is the value on the most authoritative, newest page.
+The harness calls build() and then ingest() / answer() / conflicts(). The implementation lives in
+knowledge/ (see the module map below); NOTES.md explains the rules and the trade-offs.
 """
 import sys
 from pathlib import Path
