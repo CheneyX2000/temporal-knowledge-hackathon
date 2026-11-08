@@ -1,3 +1,2 @@
-# Optional: enables the LLM answer composer when ANTHROPIC_API_KEY is set.
-# Without it (or without a key) the system runs on the standard library only.
-anthropic>=2.6,<3
+# No third-party packages: the system (including the optional OpenRouter LLM layer) uses only
+# the Python standard library.

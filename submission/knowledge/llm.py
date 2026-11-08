@@ -1,7 +1,7 @@
 """
 Optional LLM answer composer.
 
-The local pipeline (solution.py) decides *which* evidence is current and authoritative: it picks the
+The local pipeline (system.py) decides *which* evidence is current and authoritative: it picks the
 snapshot, drops stale copies and expired offers, and applies the honesty gate. This module only turns
 that pre-filtered evidence into a member-facing answer. Three guards keep it safe to use:
 
@@ -10,13 +10,12 @@ that pre-filtered evidence into a member-facing answer. Three guards keep it saf
   back to the deterministic local answer);
 * answers are cached per (question, as_of), so asking twice gives the same answer.
 
-Backends (first one configured wins):
-  1. OpenRouter  - OPENROUTER_API_KEY; plain HTTPS via the standard library (no extra package).
-  2. Anthropic   - ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN with the `anthropic` package installed.
-With neither, or on any error, the caller keeps the deterministic local answer.
-A `.env` file in the working directory or next to this file is read for these variables (it never
-overrides variables already set). Overrides: KS_LLM=0 disables the layer, KS_LLM_MODEL picks the model,
-KS_LLM_EFFORT the reasoning effort, KS_LLM_TIMEOUT the per-request timeout in seconds.
+Backend: OpenRouter chat completions over plain HTTPS (standard library only), enabled when
+OPENROUTER_API_KEY is set -- in the environment or in a `.env` file in the working directory (never
+overriding variables already set). Without a key, or on any error, the caller keeps the deterministic
+local answer. Overrides: KS_LLM=0 disables the layer, KS_LLM_MODEL picks the model (default DeepSeek
+V4.1 Flash), KS_LLM_EFFORT the reasoning effort, KS_LLM_TIMEOUT the hard per-call deadline in seconds.
+Another provider would only need its own `_call_*` function returning the JSON text.
 """
 from __future__ import annotations
 
@@ -30,26 +29,24 @@ import urllib.request
 from pathlib import Path
 
 
-def _load_dotenv() -> None:
-    for p in (Path.cwd() / ".env", Path(__file__).resolve().parent / ".env",
-              Path(__file__).resolve().parent.parent / ".env"):
-        try:
-            for line in p.read_text().splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
-        except OSError:
-            continue
+def _load_dotenv(path: Path = Path(".env")) -> None:
+    """Local-development convenience: KEY=VALUE lines from ./.env (graders just set the variable)."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
 _load_dotenv()
 EFFORT = os.getenv("KS_LLM_EFFORT", "low")
 TIMEOUT_S = float(os.getenv("KS_LLM_TIMEOUT", "1.9"))   # speed is scored on p95 <= 2 s; slow calls fall back
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-BACKEND = ("openrouter" if os.getenv("OPENROUTER_API_KEY") else
-           "anthropic" if (os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")) else None)
-MODEL = os.getenv("KS_LLM_MODEL", "deepseek/deepseek-v4.1-flash" if BACKEND == "openrouter" else "claude-opus-5-5")
+MODEL = os.getenv("KS_LLM_MODEL", "deepseek/deepseek-v4.1-flash")
 
 SYSTEM = """You answer credit-union members' questions using ONLY the evidence provided, which comes from \
 the credit union's own website as it stood on a given date. The evidence has already been filtered: \
@@ -83,10 +80,7 @@ SCHEMA = {
 }
 
 _NUM = re.compile(r"\d[\d,]*(?:\.\d+)?")
-_client = None
-_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4)
-_disabled_reason: Optional[str] = None
-_use_fallbacks = True
+_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 
 def _norm_num(s: str) -> str:
@@ -101,27 +95,7 @@ def numbers(text: str) -> set[str]:
 
 
 def available() -> bool:
-    global _client, _disabled_reason
-    if _client is not None:
-        return True
-    if _disabled_reason is not None:
-        return False
-    if os.getenv("KS_LLM", "1") == "0":
-        _disabled_reason = "disabled by KS_LLM=0"
-        return False
-    if BACKEND is None:
-        _disabled_reason = "no credentials"
-        return False
-    if BACKEND == "openrouter":
-        _client = "openrouter"
-        return True
-    try:
-        import anthropic
-        _client = anthropic.Anthropic(timeout=TIMEOUT_S, max_retries=1)
-        return True
-    except Exception as e:  # package missing or misconfigured -> local only
-        _disabled_reason = f"anthropic unavailable: {e}"
-        return False
+    return os.getenv("KS_LLM", "1") != "0" and bool(os.getenv("OPENROUTER_API_KEY"))
 
 
 def _call_openrouter(user: str) -> Optional[str]:
@@ -150,31 +124,6 @@ def _call_openrouter(user: str) -> Optional[str]:
     return content
 
 
-def _call_anthropic(user: str) -> Optional[str]:
-    """Anthropic SDK; uses server-side refusal fallbacks when the account supports them."""
-    global _use_fallbacks
-    import anthropic
-    kwargs = dict(
-        model=MODEL,
-        max_tokens=2000,
-        system=SYSTEM,
-        messages=[{"role": "user", "content": user}],
-        output_config={"effort": EFFORT, "format": {"type": "json_schema", "schema": SCHEMA}},
-    )
-    if _use_fallbacks:
-        try:
-            resp = _client.beta.messages.create(
-                betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kwargs)
-        except (anthropic.BadRequestError, TypeError):
-            _use_fallbacks = False      # not supported here: plain request from now on
-            resp = None
-    if not _use_fallbacks or resp is None:
-        resp = _client.messages.create(**kwargs)
-    if getattr(resp, "stop_reason", None) in ("refusal", "max_tokens"):
-        return None
-    return next((b.text for b in resp.content if getattr(b, "type", "") == "text"), None)
-
-
 def compose(question: str, as_of_label: str, evidence: list[dict]) -> Optional[dict]:
     """Return {"answer", "confident", "source_urls", "conflict_note"} or None to use the local answer."""
     if not evidence or not available():
@@ -188,7 +137,7 @@ def compose(question: str, as_of_label: str, evidence: list[dict]) -> Optional[d
     user = (f"Website as of: {as_of_label}\n\nEvidence:\n\n" + "\n\n".join(blocks) +
             f"\n\nMember question: {question}")
     # Hard wall-clock deadline (socket timeouts alone are per read, not per request).
-    fut = _POOL.submit(_call_openrouter if BACKEND == "openrouter" else _call_anthropic, user)
+    fut = _POOL.submit(_call_openrouter, user)
     try:
         text = fut.result(timeout=TIMEOUT_S)
     except Exception:

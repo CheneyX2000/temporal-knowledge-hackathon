@@ -12,7 +12,7 @@ from .contract import Answer, Source
 from .index import Index
 from .pages import Unit, split_page
 from .query import ANSWER_TYPES, LINK_Q_RE, QInfo, analyse
-from .text import PCT_RE, PCT_VALUE_RE, SYN, expand, stem, url_key
+from .text import PCT_RE, SYN, expand, stem, url_key
 
 
 REFUSAL_TEXT = ("I'm not able to confirm that from the Dupaco website - it isn't listed there. "
@@ -47,7 +47,6 @@ class TemporalKnowledge(ConflictsMixin):
             if k not in current:
                 for u in split_page(p.url, p.title, p.markdown, p.fetched_at, counter, snapshot.taken_on):
                     u.authority *= 0.8
-                    u.carried = True
                     units.append(u)
         self._known_pages.update(current)
         self._mark_stale(units)
@@ -175,11 +174,11 @@ class TemporalKnowledge(ConflictsMixin):
                 mult *= fit
                 if u.stale:
                     mult *= 0.05
-                if value_q and not PCT_VALUE_RE.search(u.text):
+                if value_q and not PCT_RE.search(u.text):
                     continue
                 if not qi.is_rate and not any(sh.search(u.text) for sh in shapes):
                     mult *= 0.6
-                elif not PCT_VALUE_RE.search(u.text):
+                elif not PCT_RE.search(u.text):
                     mult *= 0.4
             else:
                 if value_q:
@@ -211,8 +210,7 @@ class TemporalKnowledge(ConflictsMixin):
         # name, "7/1 ARM") -- must be on the unit we answer from; otherwise say it isn't listed.
         cov = idx.coverage(best_i, qi.content, qi.names) if qi.content else 1.0
         tf = idx.docs[best_i][0]
-        names = {stem(w.lower()) for w in re.findall(r"(?<![.?!]\s)(?<!^)\b([A-Z][a-z]{2,})\b", question)}
-        missing_rare = [t for t in qi.content if t in names and idx.idf.get(t, 0) >= 6.0 and t not in tf
+        missing_rare = [t for t in qi.content if t in qi.names and idx.idf.get(t, 0) >= 6.0 and t not in tf
                         and not (SYN.get(t, set()) & tf.keys())]
         need = 0.7 if value_q else 0.45
         if cov < need or missing_rare:
@@ -237,7 +235,7 @@ class TemporalKnowledge(ConflictsMixin):
             text = "\n\n".join(p.text[:700] for p in parts)
             srcs = [Source(url=best.url, snapshot_id=sid, quote=best.text[:200])]
             keys = {m.group(0) for sh in shapes for m in sh.finditer(best.text)}
-            for s_, i in scored[1:40]:      # other pages stating the same phone / routing / address
+            for _, i in scored[1:40]:       # other pages stating the same phone / routing / address
                 u = idx.units[i]
                 if keys and len(srcs) < 3 and all(x.url != u.url for x in srcs) and any(k in u.text for k in keys):
                     srcs.append(Source(url=u.url, snapshot_id=sid, quote=u.text[:200]))
@@ -250,20 +248,14 @@ class TemporalKnowledge(ConflictsMixin):
         # extractive chunks are weakest, from the same current, non-stale evidence.
         if best.kind == "row":
             return local
-        evidence = self._evidence(idx, scored, rows if best.kind == "row" else [])
-        self._llm_ctx = (evidence, f"{taken_on} (snapshot {sid})", local)
+        self._llm_ctx = (self._evidence(idx, scored), f"{taken_on} (snapshot {sid})", local)
         return local
 
-    def _evidence(self, idx: Index, scored, rows: list[Unit], limit: int = 8) -> list[dict]:
+    @staticmethod
+    def _evidence(idx: Index, scored, limit: int = 8) -> list[dict]:
         """The top non-stale units, as plain dicts for the LLM (stale copies are never shown to it)."""
         out, seen = [], set()
-        if rows:
-            txt = "\n".join(f"- {r.text}" for r in rows)
-            ctx = rows[0].context.split(" / ")[-1] if rows[0].context else rows[0].title
-            out.append({"url": rows[0].url, "ptype": rows[0].ptype, "pub_date": rows[0].pub_date,
-                        "text": f"{ctx}:\n{txt}"})
-            seen.update(r.text for r in rows)
-        for s, i in scored:
+        for _, i in scored:
             if len(out) >= limit:
                 break
             u = idx.units[i]
@@ -324,7 +316,7 @@ class TemporalKnowledge(ConflictsMixin):
             for s, i in scored[1:60]:
                 u = idx.units[i]
                 if u.kind == "row" and (u.url, u.table_id) not in tables and s >= 0.5 * best_s \
-                        and u.authority >= 0.8 and len(tables) < 4 and PCT_VALUE_RE.search(u.text):
+                        and u.authority >= 0.8 and len(tables) < 4 and PCT_RE.search(u.text):
                     tables.add((u.url, u.table_id))
                     rows += [r for r in idx.units if r.table_id == u.table_id and r.url == u.url
                              and r.kind == "row" and self._row_fit(r, qi) is not None][:8]

@@ -11,7 +11,8 @@ import re
 from .text import DATE_RE, FLAGS, METRIC_WORD_RE, MONEY_RE, MONTHS, PCT_RE, model_year_range, money_range, norm_text, terms_months
 
 
-def page_type(url: str, title: str) -> tuple[str, float]:
+def page_type(url: str) -> tuple[str, float]:
+    """(page type, authority) from the URL path."""
     p = urlparse(url)
     path = p.path.lower().rstrip("/")
     if p.query and "privacy-policy" in path:
@@ -98,19 +99,17 @@ class Unit:
     flags: set = field(default_factory=set)
     stale: bool = False        # superseded copy, or an offer that had already ended
     tier_rank: int = 0         # model-year tier rank inside its table (1 = newest vehicles)
-    carried: bool = False      # page missing from this crawl, carried over from an earlier one
-    caption: str = ""          # the first line under a table (footnotes often name the product)
+    caption: str = ""          # footnotes / link text under a table: they often name the product
 
 
-def _is_heading(line: str) -> bool:
-    s = line.strip()
-    return bool(s) and (s.startswith("#") or (len(s) < 70 and not s.startswith("|") and not s.endswith(".")
-                                              and not s.startswith("[") and not s.startswith("!")))
+def _is_label(s: str) -> bool:
+    """A short title-like line ("Share Savings", "Regular Certificates") -- not a sentence or a link."""
+    return len(s) < 50 and not s.startswith(("|", "[", "!")) and not s.endswith(".")
 
 
 def split_page(url: str, title: str, md: str, fetched_at: str, table_counter: list,
                taken_on: str = "9999-12-31") -> list[Unit]:
-    ptype, auth = page_type(url, title)
+    ptype, auth = page_type(url)
     md = norm_text(md)
     head = md[:600]
     dm = DATE_RE.search(head)
@@ -118,7 +117,7 @@ def split_page(url: str, title: str, md: str, fetched_at: str, table_counter: li
     units: list[Unit] = []
     lines = md.split("\n")
     recent_heads: list[str] = []      # markdown "#" headings
-    labels: list[str] = []            # short label lines seen since the last long paragraph
+    labels: list[str] = []            # short label lines seen since the last heading / table
     i = 0
     buf: list[str] = []
 
@@ -179,7 +178,7 @@ def split_page(url: str, title: str, md: str, fetched_at: str, table_counter: li
                 flush()
             elif size + len(s) > 700:
                 flush()
-            if _is_heading(s) and len(s) < 50:
+            if _is_label(s):
                 labels.append(s.strip("*: "))
             buf.append(s)
             if len(s) > 160 and sum(len(b) for b in buf) > 250:

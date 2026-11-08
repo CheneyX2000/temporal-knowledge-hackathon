@@ -9,7 +9,7 @@ import re
 from .contract import Answer, Conflict, Source
 from .pages import Unit
 from .query import QInfo
-from .text import PCT_RE, TIER_CELL_RE, VALUE_CELL_RE
+from .text import GENERIC_S, PCT_RE, TIER_CELL_RE, VALUE_CELL_RE, content_terms, stem
 
 
 # Prose claims about the organisation that drift over time (checked for conflicts).
@@ -30,6 +30,10 @@ ORDINALS = {w: i for i, w in enumerate("first second third fourth fifth sixth se
 
 ORDINAL_CLAIM_RE = re.compile(r"[^.\n]*\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+"
                               r"(?:time|consecutive year|year in a row|straight year)\b[^.\n]*", re.I)
+
+
+# words that may follow "how many branches ..." without narrowing the question
+COUNT_FILLER = {stem(w) for w in "dupaco operate operates office offices location locations total there exist".split()}
 
 
 RECOGNIZERS = ("Forbes", "Newsweek", "Money", "Bankrate", "Iowa Business Record", "Employ Humanity")
@@ -63,7 +67,7 @@ class ConflictsMixin:
             return []
         # (key, column) -> list of (value, unit, snapshot index)
         obs = defaultdict(list)
-        for si, (sid, taken, idx) in enumerate(self.snaps):
+        for si, (_, _, idx) in enumerate(self.snaps):
             for u in idx.units:
                 if u.kind != "row" or u.ptype in ("junk",):
                     continue
@@ -87,15 +91,12 @@ class ConflictsMixin:
             cur = [(v, u) for v, u, si in lst if si == latest]
             if not cur:
                 continue
-            # winner: most authoritative page in the latest snapshot, newest fetch first
-            cur.sort(key=lambda x: (-x[1].authority, x[1].fetched_at), reverse=False)
+            # winner: the most authoritative page in the latest snapshot (ties: earliest fetch)
+            cur.sort(key=lambda x: (-x[1].authority, x[1].fetched_at))
             win_v, win_u = cur[0]
-            # the winning page must agree with itself and be authoritative
-            if win_u.authority < 0.6:
+            if win_u.authority < 0.6:       # no authoritative page states it: nothing to resolve to
                 continue
             others = sorted({v for v, _, _ in lst if v != win_v}, key=lambda x: float(x[:-1]))
-            if not others:
-                continue
             # keep it a single-product conflict: skip keys that map to many distinct values (table drift)
             if len(others) > 8:
                 continue
@@ -206,6 +207,11 @@ class ConflictsMixin:
             out.append(Conflict(topic=topic, values=vals, sources=srcs, resolution=win_c[1], reason=reason))
         return out
 
+    def _snapshot_claims(self, si: int) -> dict:
+        if si not in self._claims_cache:
+            self._claims_cache[si] = self._claims([si])
+        return self._claims_cache[si]
+
     def _recognition_answer(self, qi: QInfo, si: int):
         """'What recognition has Dupaco received from Forbes?' -- the newest dated release's ordinal wins,
         the same rule conflicts() applies."""
@@ -213,10 +219,7 @@ class ConflictsMixin:
         if org is None or not re.search(r"recogni|award|rank|named|honor|list", qi.text, re.I):
             return None
         what = "employer" if re.search(r"employer|workplace|place to work", qi.text, re.I) else "credit union"
-        cache = self._claims_cache.setdefault(si, {})
-        if "claims" not in cache:
-            cache["claims"] = self._claims([si])
-        lst = cache["claims"].get(("ordinal", f"{org} {what}"))
+        lst = self._snapshot_claims(si).get(("ordinal", f"{org} {what}"))
         if not lst:
             return None
         c = self._claim_winner(lst, si)
@@ -237,10 +240,12 @@ class ConflictsMixin:
                     (k == "branch" and m.group(1).startswith("location"))), None)
         if key is None:
             return None
-        cache = self._claims_cache.setdefault(si, {})
-        if "claims" not in cache:
-            cache["claims"] = self._claims([si])
-        lst = cache["claims"].get(("count", key))
+        # Only when the count itself is the question ("how many branches does Dupaco have?"), not a
+        # narrower one ("how many employees used Volunteer Time Off?") -- that goes to normal retrieval.
+        rest = [t for t in content_terms(qi.text[m.end():]) if t not in GENERIC_S and t not in COUNT_FILLER]
+        if rest:
+            return None
+        lst = self._snapshot_claims(si).get(("count", key))
         if not lst:
             return None
         c = self._claim_winner(lst, si)

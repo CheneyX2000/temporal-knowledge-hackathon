@@ -8,15 +8,14 @@ import re
 TOKEN_RE = re.compile(r"[a-z0-9]+(?:\.[0-9]+)?")
 
 
-STOP = set("""a an the of to for and or in on at by with from is are was were be been do does did
-what whats what's which who whom how when where why can could would should will shall may might
-i me my we our you your it its this that these those there their they them as about any all
-tell give get show provide like know need want please much many current currently right now
-today dupaco dupacos credit union s vs than then also just only still going new have has had pay
-charge charged earn get got am im i'm looking would like some any one there here want using use
-repeat again remind confirm say said tell if keep main primary general it my million thousand balance balances
-january february march april june july august september october november december jan feb mar apr jun
-jul aug sep sept oct nov dec as of""".split())
+STOP = set("""a an the of to for and or in on at by with from is are was were be been do does did what whats
+what's which who whom how when where why can could would should will shall may might i me my we our
+you your it its this that these those there their they them as about any all tell give get show
+provide like know need want please much many current currently right now today dupaco dupacos credit
+union s vs than then also just only still going new have has had pay charge charged earn got am im
+i'm looking some one here using use repeat again remind confirm say said if keep main primary
+general million thousand balance balances january february march april june july august september
+october november december jan feb mar apr jun jul aug sep sept oct nov dec""".split())
 
 
 # Words that describe the *kind* of fact asked for, not the product; they never decide coverage.
@@ -198,5 +197,3 @@ def url_key(u: str) -> str:
     p = urlparse(u)
     return (p.netloc.lower().removeprefix("www.") + p.path.rstrip("/").lower())
 
-
-PCT_VALUE_RE = re.compile(r"\d+(?:\.\d+)?%")

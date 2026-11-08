@@ -103,10 +103,10 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(is_expired("Offer valid through 12/31/2026.", "2026-09-28"))
 
     def test_page_authority_order(self):
-        rates = page_type("https://www.dupaco.com/rates", "")[1]
-        product = page_type("https://www.dupaco.com/personal/loans/auto-loans", "")[1]
-        calc = page_type("https://www.dupaco.com/calculators/vehicle-payment", "")[1]
-        blog = page_type("https://www.dupaco.com/learn/blog/x", "")[1]
+        rates = page_type("https://www.dupaco.com/rates")[1]
+        product = page_type("https://www.dupaco.com/personal/loans/auto-loans")[1]
+        calc = page_type("https://www.dupaco.com/calculators/vehicle-payment")[1]
+        blog = page_type("https://www.dupaco.com/learn/blog/x")[1]
         self.assertGreater(rates, product)
         self.assertGreater(product, blog)
         self.assertGreater(blog, calc)
@@ -162,10 +162,9 @@ class LLMGuardTests(unittest.TestCase):
 
     def test_numbers_must_be_grounded(self):
         ev = [{"url": "https://x.test/rates", "ptype": "rates", "pub_date": None, "text": "12 Month APY 3.40%"}]
-        orig = (llm.available, llm.BACKEND, llm._call_openrouter)
+        orig = (llm.available, llm._call_openrouter)
         try:
             llm.available = lambda: True
-            llm.BACKEND = "openrouter"
             llm._call_openrouter = lambda user: ('{"answer": "It pays 3.40% APY (was 2.90%).", "confident": true, '
                                                  '"source_urls": ["https://x.test/rates"], "conflict_note": ""}')
             self.assertIsNone(llm.compose("12 month APY?", "2026-09-28", ev))      # 2.90 is not in evidence
@@ -173,7 +172,7 @@ class LLMGuardTests(unittest.TestCase):
                                                  '"source_urls": ["https://x.test/rates"], "conflict_note": ""}')
             self.assertEqual(llm.compose("12 month APY?", "2026-09-28", ev)["answer"], "It pays 3.40% APY.")
         finally:
-            llm.available, llm.BACKEND, llm._call_openrouter = orig
+            llm.available, llm._call_openrouter = orig
 
 
 if __name__ == "__main__":
