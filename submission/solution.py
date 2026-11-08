@@ -85,7 +85,7 @@ i me my we our you your it its this that these those there their they them as ab
 tell give get show provide like know need want please much many current currently right now
 today dupaco dupacos credit union s vs than then also just only still going new have has had pay
 charge charged earn get got am im i'm looking would like some any one there here want using use
-repeat again remind confirm say said tell
+repeat again remind confirm say said tell if keep main primary general it my million thousand balance balances
 january february march april june july august september october november december jan feb mar apr jun
 jul aug sep sept oct nov dec as of""".split())
 # Words that describe the *kind* of fact asked for, not the product; they never decide coverage.
@@ -103,6 +103,7 @@ ANSWER_TYPES = [
                 r"Blvd|Pkwy|Hwy|Way|Ct|Pl)\b")),
     (re.compile(r"\b(phone|call|telephone)\b", re.I), re.compile(r"\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}")),
     (re.compile(r"\b(routing|aba)\b", re.I), re.compile(r"\b\d{9}\b")),
+    (re.compile(r"\b(fee|fees|cost|costs|charge|charged)\b|\bhow much\b", re.I), re.compile(r"\$\s?\d")),
     (re.compile(r"\b(link|url|website|web address)\b", re.I), re.compile(r"https?://|\b[a-z]+\.dupaco\.com")),
 ]
 
@@ -111,8 +112,8 @@ MONTHS = {m: i for i, m in enumerate(
 DATE_RE = re.compile(r"\b(January|February|March|April|May|June|July|August|September|October|"
                      r"November|December) (\d{1,2}), (20\d\d)\b")
 TERM_RE = re.compile(r"\b(\d{1,3})\s*[- ]?\s*(months?|mos?\.?|years?|yrs?)\b", re.I)
-MODEL_YEAR_RE = re.compile(r"\b(20\d\d|19\d\d)\s*[-–]\s*(\d{2,4})\s*model year|\b(20\d\d|19\d\d)\s*model year"
-                           r"(\s*\(and older\))?", re.I)
+MODEL_YEAR_RE = re.compile(r"\b(?:model year\s*)?(20\d\d|19\d\d)\s*[-–]\s*(\d{2,4})(?:\s*model year)?(?!\d)|"
+                           r"\b(20\d\d|19\d\d)\s*model year(\s*\(and older\))?", re.I)
 MONEY_RE = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?\s*(k|m|million|thousand)?", re.I)
 PCT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 FOOTNOTE_RE = re.compile(r"(\d(?:\.\d+)?%)\d\b")      # "5.39% APR1" / "4.20%1" -> drop footnote digit
@@ -179,7 +180,7 @@ def stem(t: str) -> str:
         return t[:-3] + "y"
     if len(t) > 3 and t.endswith("s") and not t.endswith("ss"):
         t = t[:-1]
-    if len(t) > 6 and not t[0].isdigit():
+    if len(t) > 7 and not t[0].isdigit():
         t = t[:6]          # crude prefix stemming: recognition/recognized, eligible/eligibility
     return t
 
@@ -201,6 +202,7 @@ _SYN_RAW = {
     "join": "join member membership", "eligible": "eligible join membership",
     "contact": "contact phone call", "university": "college student",
     "share": "share certificate savings",
+    "wallet": "wallet pay apple google samsung mobile", "wallets": "wallet pay apple google samsung mobile",
 }
 SYN = {stem(k): {stem(x) for x in v.split()} | {stem(k)} for k, v in _SYN_RAW.items()}
 
@@ -247,9 +249,11 @@ def model_year_range(s: str):
     if not m:
         return None
     if m.group(1):
+        if "model" not in m.group(0).lower():
+            return None
         a, b = int(m.group(1)), m.group(2)
         b = int(b) if len(b) == 4 else int(str(a)[:2] + b)
-        return (a, b)
+        return (min(a, b), max(a, b))       # "2024-27" and "2026-23" both work
     a = int(m.group(3))
     return (1900, a) if m.group(4) else (a, a)
 
@@ -287,6 +291,8 @@ def page_type(url: str, title: str) -> tuple[str, float]:
     if "calculator" in path:
         return "calculator", 0.25
     if path.startswith("/hubfs"):
+        if re.search(r"fee-schedule|rate-sheet|truth-in-savings|disclosure", path):
+            return "schedule", 0.85      # official fee/rate schedule published as a PDF
         return "pdf", 0.4
     if path.startswith("/newsroom"):
         return "news", 0.55
@@ -299,7 +305,7 @@ def page_type(url: str, title: str) -> tuple[str, float]:
     if path.startswith("/personal") or path.startswith("/business") or path.startswith("/about") \
             or path in ("/contact", "/checking", "/loans", "/membership", "/personal-loans") \
             or path.startswith("/connect") or path.startswith("/online-and-mobile-banking"):
-        return "product", 0.85
+        return ("contact" if path == "/contact" else "product"), 0.85
     return "other", 0.65
 
 
@@ -365,6 +371,7 @@ class Unit:
     stale: bool = False        # superseded copy, or an offer that had already ended
     tier_rank: int = 0         # model-year tier rank inside its table (1 = newest vehicles)
     carried: bool = False      # page missing from this crawl, carried over from an earlier one
+    caption: str = ""          # the first line under a table (footnotes often name the product)
 
 
 def _is_heading(line: str) -> bool:
@@ -403,7 +410,7 @@ def split_page(url: str, title: str, md: str, fetched_at: str, table_counter: li
             header = [c.strip() for c in s.strip("|").split("|")]
             table_counter[0] += 1
             tid = table_counter[0]
-            ctx = " / ".join(recent_heads[-1:] + [l for l in labels[-2:] if l not in recent_heads[-1:]])
+            ctx = " / ".join(recent_heads[-1:] + [l for l in labels[-3:] if l not in recent_heads[-1:]])
             labels.clear()
             i += 2
             while i < len(lines) and lines[i].strip().startswith("|"):
@@ -414,6 +421,15 @@ def split_page(url: str, title: str, md: str, fetched_at: str, table_counter: li
                     units.append(Unit(url, title, ptype, auth, "row", disp, ctx, header, cells, tid,
                                       pub, fetched_at))
                 i += 1
+            # footnote right under the table ("1Term Share Certificate Rates: ...") names the product
+            j = i
+            while j < len(lines) and j < i + 4 and not lines[j].strip():
+                j += 1
+            if j < len(lines) and not lines[j].strip().startswith("|"):
+                cap = lines[j].strip()[:300]
+                for u in units:
+                    if u.table_id == tid:
+                        u.caption = cap
             continue
         if not s:
             pass
@@ -431,8 +447,6 @@ def split_page(url: str, title: str, md: str, fetched_at: str, table_counter: li
                 flush()
             if _is_heading(s) and len(s) < 50:
                 labels.append(s.strip("*: "))
-            elif len(s) > 160:
-                labels.clear()
             buf.append(s)
             if len(s) > 160 and sum(len(b) for b in buf) > 250:
                 flush()
@@ -448,7 +462,21 @@ def split_page(url: str, title: str, md: str, fetched_at: str, table_counter: li
         for line in u.text.split("\n"):
             ln = line.strip().lstrip("-*# ").strip()
             pcts = PCT_RE.findall(ln)
-            if len(pcts) != 1 or len(ln) > 200 or ln.startswith("|") or not METRIC_WORD_RE.search(ln):
+            money = MONEY_RE.findall(ln)
+            if ln.startswith("|") or len(ln) > 200:
+                continue
+            if len(pcts) == 1 and METRIC_WORD_RE.search(ln):
+                pass
+            elif not pcts and len(money) == 1 and len(ln) <= 160:      # "Domestic wire $25.00 each"
+                m_ = MONEY_RE.search(ln)
+                label = (ln[:m_.start()] + " " + ln[m_.end():]).strip(" :-*")
+                table_counter[0] += 1
+                r = Unit(url, title, ptype, auth, "row", ln, u.context, ["", "amount"], [label, m_.group(0)],
+                         table_counter[0], pub, fetched_at)
+                r.stale = u.stale
+                extra.append(r)
+                continue
+            else:
                 continue
             label = PCT_RE.sub("", ln)
             label = re.sub(r"\(.*?\)", "", label).strip(" :-")
@@ -492,7 +520,7 @@ class Index:
         self.docs = []
         df = Counter()
         for u in units:
-            t = tokens(f"{u.title} {u.context} {u.text}") if u.kind == "row" else tokens(f"{u.title} {u.context} {u.text}")
+            t = tokens(f"{u.title} {u.context} {u.caption} {u.text}")
             tf = Counter(t)
             self.docs.append((tf, len(t)))
             df.update(tf.keys())
@@ -518,9 +546,11 @@ class Index:
 
     def coverage(self, i: int, q_terms: list[str]) -> float:
         tf, _ = self.docs[i]
-        tot = sum(self.idf.get(t, 3.0) for t in q_terms) or 1.0
-        hit = sum(self.idf.get(t, 3.0) for t in q_terms if t in tf or (SYN.get(t, set()) & tf.keys()))
-        return hit / tot
+        # words the website never uses (a car brand, small talk) cannot identify a product: skip them
+        q_terms = [t for t in q_terms if t in self.idf]
+        tot = sum(self.idf[t] for t in q_terms) or 1.0
+        hit = sum(self.idf[t] for t in q_terms if t in tf or (SYN.get(t, set()) & tf.keys()))
+        return hit / tot if q_terms else 1.0
 
 
 # ---------------------------------------------------------------------------------------------
@@ -544,16 +574,20 @@ def analyse(q: str) -> QInfo:
     qn = norm_text(norm_question(q))
     months = terms_months(qn)
     my = None
-    if re.search(r"model|vehicle|car|auto|truck|motorcycle", qn, re.I):
+    if re.search(r"model|vehicle|car|auto|truck|motorcycle|loan|apr", qn, re.I):
         ym = re.search(r"\b(19[89]\d|20[0-3]\d)\b", qn)
         my = int(ym.group(1)) if ym else None
     amounts = [money_value(m) for m in MONEY_RE.finditer(qn)]
-    flags = {k for k, rx in FLAGS.items() if rx.search(qn)}
-    is_rate = bool(RATE_Q_RE.search(qn))
+    negated = re.sub(r"\b(not|non|no|excluding|without)[\s-]+(a\s+|the\s+)?(jumbo|ira|business|special|intro)\b", " ", qn,
+                     flags=re.I)
+    flags = {k for k, rx in FLAGS.items() if rx.search(negated)}
+    is_rate = bool(RATE_Q_RE.search(qn)) or bool(
+        re.search(r"\b(pay|pays|earn|earns)\b", qn, re.I) and
+        re.search(r"\b(savings?|certificates?|cds?|checking|money market|ira|club)\b", qn, re.I))
     specific = bool(months or my or amounts or re.search(r"\b(highest|lowest|best|standard)\b", qn, re.I))
     is_list = bool(LIST_Q_RE.search(qn)) and not specific
-    terms = tokens(qn)
-    content = [t for t in content_terms(qn) if t not in GENERIC_S and t not in ("month", "year")]
+    terms = tokens(negated)
+    content = [t for t in content_terms(negated) if t not in GENERIC_S and t not in ("month", "year")]
     return QInfo(qn, terms, content, months, my, amounts, flags, is_rate, is_list, specific)
 
 
@@ -571,6 +605,7 @@ class TemporalKnowledge:
         self._conflicts = None
         self._known_pages: dict = {}
         self._llm_ctx = None
+        self._claims_cache: dict = {}
 
     # ---------------------------------------------------------------- ingest
     def ingest(self, snapshot) -> None:
@@ -638,19 +673,16 @@ class TemporalKnowledge:
         """Multiplier for how well a table row's qualifiers fit the question; None = excluded."""
         m = 1.0
         if qi.months:
-            if u.terms:
-                if not (u.terms & qi.months):
-                    return None
-                m *= 1.6
-            else:
-                m *= 0.5
+            if not u.terms or not (u.terms & qi.months):
+                return None       # the question names a term this row doesn't have
+            m *= 1.6
         if qi.model_year is not None and u.myear:
             if not (u.myear[0] <= qi.model_year <= u.myear[1]):
                 return None
             m *= 1.5
         if qi.amounts and u.mrange:
             lo, hi = u.mrange
-            if all(lo - 1 <= a <= hi + 1 for a in qi.amounts):
+            if all(lo - 0.005 <= a <= hi + 0.005 for a in qi.amounts):
                 width = (hi if hi != float("inf") else lo * 4 + 1) - lo
                 m *= 1.5 + 1.0 / (1 + math.log10(1 + width))
             else:
@@ -690,6 +722,14 @@ class TemporalKnowledge:
         raw = idx.search(expand(qi.terms))
         if not raw:
             return Answer(text=REFUSAL_TEXT, confident=False)
+        si = self.snaps.index(snap)
+        counted = self._count_answer(qi, si)
+        if counted is not None:
+            return counted
+        place = re.search(r"\b(?:branch(?:es)?|location|office)s?\s+(?:in|near|at)\s+([A-Z][a-zA-Z]+)", question)
+        if place and not any(u.ptype == "contact" and place.group(1) in u.text for u in idx.units):
+            return Answer(text=f"I couldn't find a Dupaco branch in {place.group(1)} on the website's location "
+                               "list. Please contact Dupaco to confirm the nearest location.", confident=False)
         how_many = re.search(r"\bhow many\s+([a-z]+)", qi.text.lower())
         count_re = None
         if how_many:
@@ -698,7 +738,8 @@ class TemporalKnowledge:
         snap_year = int(taken_on[:4]) + int(taken_on[5:7]) / 12
         # A "value" question asks for a rate; rates are only quoted from rate tables.
         value_q = qi.is_rate and not LINK_Q_RE.search(qi.text)
-        shapes = [shape for trig, shape in ANSWER_TYPES if trig.search(qi.text)]
+        shapes = [shape for trig, shape in ANSWER_TYPES if trig.search(qi.text)
+                  and not (qi.is_rate and "\\$" in shape.pattern)]     # "what APR does X charge" is a rate
 
         scored = []
         for i, s in raw.items():
@@ -715,7 +756,7 @@ class TemporalKnowledge:
                     mult *= 0.05
                 if value_q and not PCT_VALUE_RE.search(u.text):
                     continue
-                if not qi.is_rate:
+                if not qi.is_rate and not any(sh.search(u.text) for sh in shapes):
                     mult *= 0.6
                 elif not PCT_VALUE_RE.search(u.text):
                     mult *= 0.4
@@ -732,11 +773,17 @@ class TemporalKnowledge:
                     if not u.pub_date:
                         mult *= 0.5     # undated pages (bios, evergreen copy) don't timestamp a count
             for shape in shapes:
-                mult *= 2.5 if shape.search(u.text) else 0.4
+                hits = len(shape.findall(u.text))
+                mult *= 2.5 if hits else 0.4
+                if hits and "\\$" in shape.pattern:      # money questions (fees): one line beats a price list
+                    mult *= 1.6 if u.kind == "row" else (0.5 if hits > 3 else 1.0)
+            if shapes and u.ptype == "contact" and any(sh.search(u.text) for sh in shapes):
+                mult *= 1.5      # the contact page is the authority for phone / address / routing
             scored.append((s * mult, i))
         if not scored:
             return Answer(text=REFUSAL_TEXT, confident=False)
         scored.sort(key=lambda x: (-x[0], x[1]))
+        self._last_scored = (idx, scored[:8])      # kept for debugging / inspection
         best_s, best_i = scored[0]
         best = idx.units[best_i]
 
@@ -744,12 +791,18 @@ class TemporalKnowledge:
         # name, "7/1 ARM") -- must be on the unit we answer from; otherwise say it isn't listed.
         cov = idx.coverage(best_i, qi.content) if qi.content else 1.0
         tf = idx.docs[best_i][0]
-        missing_rare = [t for t in qi.content if idx.idf.get(t, 0) >= 6.0 and t not in tf
+        names = {stem(w.lower()) for w in re.findall(r"(?<![.?!]\s)(?<!^)\b([A-Z][a-z]{2,})\b", question)}
+        missing_rare = [t for t in qi.content if t in names and idx.idf.get(t, 0) >= 6.0 and t not in tf
                         and not (SYN.get(t, set()) & tf.keys())]
         need = 0.7 if value_q else 0.45
         if cov < need or missing_rare:
             return Answer(text=REFUSAL_TEXT, confident=False)
 
+        if best.kind == "row" and qi.amounts and best.mrange is None:
+            table = [u for u in idx.units if u.table_id == best.table_id and u.url == best.url and u.mrange]
+            his = [u.mrange[1] for u in table]
+            if his and max(qi.amounts) > max(his):      # e.g. a $1.5M loan when tiers stop at $832,750
+                return Answer(text=REFUSAL_TEXT, confident=False)
         if best.kind == "row":
             rows = self._select_rows(idx, scored, best, qi)
             text = self._format_rows(rows)
@@ -763,6 +816,11 @@ class TemporalKnowledge:
                     break
             text = "\n\n".join(p.text[:700] for p in parts)
             srcs = [Source(url=best.url, snapshot_id=sid, quote=best.text[:200])]
+            keys = {m.group(0) for sh in shapes for m in sh.finditer(best.text)}
+            for s_, i in scored[1:40]:      # other pages stating the same phone / routing / address
+                u = idx.units[i]
+                if keys and len(srcs) < 3 and all(x.url != u.url for x in srcs) and any(k in u.text for k in keys):
+                    srcs.append(Source(url=u.url, snapshot_id=sid, quote=u.text[:200]))
         note = None
         if as_of:
             note = f"Answered from the website as it stood on {taken_on} (snapshot {sid})."
@@ -831,6 +889,11 @@ class TemporalKnowledge:
                 return [max(cand, key=last_pct) if hi else min(cand, key=last_pct)]
         if qi.specific:
             rows = [u for u, f in fits if f >= best_fit * 0.99]
+            if qi.amounts:
+                tiered = [u for u in rows if u.mrange]
+                if tiered:      # "$100,000 or less" fits every "or less" tier: keep the narrowest one
+                    w = lambda u: (u.mrange[1] if u.mrange[1] != float("inf") else 1e15) - u.mrange[0]
+                    rows = [u for u in tiered if w(u) == min(w(x) for x in tiered)]
             return rows[:6] or [best]
         rows = [u for u, f in fits][:12]
         if qi.is_list:
@@ -950,13 +1013,11 @@ class TemporalKnowledge:
         self._conflicts = out
         return out
 
-    def _prose_conflicts(self) -> list:
-        """Organisation-level facts stated in prose ("22 branch office locations", "the fifth time Forbes
-        recognized Dupaco") that different pages or snapshots state differently. These facts change over
-        time, so the newest *dated* statement in the latest snapshot wins; undated copy only counts when
-        nothing dated exists."""
-        claims = defaultdict(list)       # key -> [(value, display, unit, snapshot index)]
-        for si, (sid, taken, idx) in enumerate(self.snaps):
+    def _claims(self, snap_ids) -> dict:
+        """Organisation-level figures stated in prose, per key: [(value, display, unit, snapshot index)]."""
+        claims = defaultdict(list)
+        for si in snap_ids:
+            idx = self.snaps[si][2]
             for u in idx.units:
                 if u.kind != "text" or u.ptype == "junk":
                     continue
@@ -971,36 +1032,44 @@ class TemporalKnowledge:
                     noun = m.group(3).lower()
                     for key, (lo, hi) in COUNT_NOUNS.items():
                         if noun.startswith(key) and lo <= n <= hi:
-                            disp = re.sub(r"\s+", " ", m.group(0).strip())
-                            claims[("count", key)].append((n, disp, u, si))
+                            claims[("count", key)].append((n, re.sub(r"\s+", " ", m.group(0).strip()), u, si))
                             break
                 for m in ORDINAL_CLAIM_RE.finditer(u.text):
                     sent = m.group(0)
                     org = next((o for o in RECOGNIZERS if o in sent), None)
                     if org is None:
                         continue
-                    n = ORDINALS[m.group(1).lower()]
                     what = "employer" if re.search(r"employer|workplace|place to work", sent, re.I) else "credit union"
-                    org = f"{org} {what}"
-                    claims[("ordinal", org)].append((n, f"{m.group(1).lower()} time", u, si))
+                    claims[("ordinal", f"{org} {what}")].append(
+                        (ORDINALS[m.group(1).lower()], f"{m.group(1).lower()} time", u, si))
+        # a count must be repeated on at least two pages (boilerplate, not a one-off mention)
+        for (kind, key), lst in list(claims.items()):
+            if kind == "count":
+                pages = defaultdict(set)
+                for v, _, u, _ in lst:
+                    pages[v].add(u.url)
+                claims[(kind, key)] = [c for c in lst if len(pages[c[0]]) >= 2]
+        return claims
+
+    @staticmethod
+    def _claim_winner(lst, latest_si):
+        """These figures change over time: the newest *dated* statement in the latest snapshot wins;
+        undated copy only counts when nothing dated exists."""
+        cur = [c for c in lst if c[3] == latest_si] or lst
+        pool = [c for c in cur if c[2].pub_date] or cur
+        newest = max(c[2].pub_date or "" for c in pool)
+        top = [c for c in pool if (c[2].pub_date or "") == newest]
+        win = Counter(v for v, _, _, _ in top).most_common(1)[0][0]
+        return next(c for c in top if c[0] == win)
+
+    def _prose_conflicts(self) -> list:
         latest = len(self.snaps) - 1
         out = []
-        for (kind, key), lst in claims.items():
-            # a figure must be repeated on at least two pages to count (boilerplate, not a one-off)
-            pages = defaultdict(set)
-            for v, _, u, _ in lst:
-                pages[v].add(u.url)
-            if kind == "count":
-                lst = [c for c in lst if len(pages[c[0]]) >= 2]
+        for (kind, key), lst in self._claims(range(len(self.snaps))).items():
             if len({v for v, _, _, _ in lst}) < 2:
                 continue
-            cur = [c for c in lst if c[3] == latest] or lst
-            dated = [c for c in cur if c[2].pub_date]
-            pool = dated or cur
-            newest = max(c[2].pub_date or "" for c in pool)
-            top = [c for c in pool if (c[2].pub_date or "") == newest]
-            win = Counter(v for v, _, _, _ in top).most_common(1)[0][0]
-            win_c = next(c for c in top if c[0] == win)
+            win_c = self._claim_winner(lst, latest)
+            win = win_c[0]
             vals, seen = [win_c[1]], {win}
             for v, disp, u, si in sorted(lst, key=lambda c: c[2].pub_date or "", reverse=True):
                 if v not in seen and len(vals) < 6:
@@ -1018,6 +1087,29 @@ class TemporalKnowledge:
                       f"snapshot says {win_c[1]}; older articles and copy still carry earlier figures")
             out.append(Conflict(topic=topic, values=vals, sources=srcs, resolution=win_c[1], reason=reason))
         return out
+
+    def _count_answer(self, qi: QInfo, si: int):
+        """'How many branches/employees/members...' -- answered with the same rule conflicts() uses."""
+        m = re.search(r"\b(?:how many|number of)\s+(?:dupaco\s+)?([a-z]+)", qi.text.lower())
+        if not m:
+            return None
+        key = next((k for k in COUNT_NOUNS if m.group(1).startswith(k) or
+                    (k == "branch" and m.group(1).startswith("location"))), None)
+        if key is None:
+            return None
+        cache = self._claims_cache.setdefault(si, {})
+        if "claims" not in cache:
+            cache["claims"] = self._claims([si])
+        lst = cache["claims"].get(("count", key))
+        if not lst:
+            return None
+        c = self._claim_winner(lst, si)
+        u = c[2]
+        when = f" (as stated {u.pub_date})" if u.pub_date else ""
+        return Answer(text=f"Dupaco has {c[1]}{when}.",
+                      sources=[Source(url=u.url, snapshot_id=self.snaps[si][0], quote=c[1])],
+                      confident=True,
+                      conflict_note="Older pages state other figures; the newest dated statement is used.")
 
 
 def build():

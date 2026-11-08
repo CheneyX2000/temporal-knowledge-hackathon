@@ -25,6 +25,17 @@ Public set (starter scores 0.09):
 
 Bundled selftest (with conflict gold): **1.00**.
 
+**Generalization check** (local mode, `dev/`). I wrote two question sets myself; expected values
+were checked by hand against the snapshots:
+
+| Set | Questions | Score | How it was used |
+|---|---|---|---|
+| `dev/holdout_eval.jsonl` | 60 | 0.68 → 0.93 | Paraphrases, other tiers and products, `as_of`, refusals, fees, branches. Misses drove the fixes, so the final number is optimistic. |
+| `dev/blind_eval.jsonl` | 25 | **0.88** | Written after the fixes and run once, with no tuning afterwards. No stale-value trap hits. |
+
+The remaining blind misses: over-refusal when an older snapshot's table lacks a heading that names
+the product (2), and the mailing address (1).
+
 LLM answers are not deterministic across separate runs. Within a run they are cached.
 
 ## How it works
