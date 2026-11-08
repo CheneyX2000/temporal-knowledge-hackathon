@@ -1,0 +1,9 @@
+results/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+snapshots/0*/
+snapshots_zip/
+Knowledge-Hackathon-Assignment.pdf
+.venv/
