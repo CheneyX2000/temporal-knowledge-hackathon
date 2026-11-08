@@ -2,13 +2,12 @@
 
 ## TL;DR
 
-- **API keys: optional.** The core is pure Python standard library: deterministic, offline, and
-  needs no packages.
+- **API keys: optional. No packages needed:** everything, including the LLM layer, is pure
+  Python standard library. Without a key the system is deterministic and offline.
 - An optional LLM layer only *phrases* prose answers from evidence the local pipeline has already
   vetted. It is a **paid API**:
-  - `OPENROUTER_API_KEY` (preferred): default model `deepseek/deepseek-v4.1-flash`. A whole
+  - Set `OPENROUTER_API_KEY`. The default model is `deepseek/deepseek-v4.1-flash`, and a whole
     public-eval run costs about $0.002–0.006.
-  - Or `ANTHROPIC_API_KEY`, with `anthropic` from `requirements.txt`.
   - Without a key, or on any error, the system uses the local answer.
 - Ingest of the five snapshots takes about 5 s. Local answers take about 20 ms. Checked on
   Python 3.11 from a fresh clone.
@@ -20,7 +19,7 @@ python -m unittest discover -s submission/tests                                 
 
 | Question set | Local only | With LLM (DeepSeek) | Notes |
 |---|---|---|---|
-| Public (40) | 0.836 | **0.851** (p95 2.0 s) | The starter scores 0.09. |
+| Public (40) | 0.836 | **0.85–0.87** (p95 ≈ 2.1 s) | The starter scores 0.09. The LLM range covers separate runs. |
 | Selftest (with conflict gold) | 1.00 | — | Conflicts F1 1.0. |
 | `dev/blind2_eval.jsonl` (22) | **0.864** | 0.864 | Written last and run once, with no tuning afterwards. |
 | `dev/blind_eval.jsonl` (25) | 0.88 on its first run | 1.00 | Its misses were then fixed, so it is no longer blind. |
@@ -41,7 +40,7 @@ products and tiers, `as_of` dates, refusals, fees and branches.
 | `index.py` | One BM25 index per snapshot, plus *coverage*: the share of the question's distinguishing words found on a unit. |
 | `system.py` | `ingest` / `answer`: snapshot choice, staleness marking, scoring, the honesty gate, row selection, sources. |
 | `claims.py` | `conflicts()`, plus answers that share its rules (organisation counts, recognitions). |
-| `llm.py` | Optional answer composer with the grounding guard, cache and deadline. |
+| `llm.py` | Optional answer composer (OpenRouter, standard library): the grounding guard, cache and deadline. |
 
 ## How it decides what is current
 
@@ -64,7 +63,9 @@ products and tiers, `as_of` dates, refusals, fees and branches.
 4. **Expired offers are stale**: "offer ended", or an end date before the crawl date.
 5. **Figures that drift** (branches, employees, members, counties, "the Nth time Forbes…"): the
    newest *dated* statement wins, and undated copy such as bios only counts as a fallback.
-   `answer()` and `conflicts()` use the same rule, so they never disagree.
+   `answer()` and `conflicts()` use the same rule, so they never disagree. The shortcut answers
+   only when the count itself is asked: "how many employees used Volunteer Time Off" goes to
+   normal retrieval.
 
 ## How it picks the right tier
 
@@ -118,10 +119,10 @@ resolution and a reason.
     answer, which keeps p95 at about 2 s.
   - Answers can differ between separate runs.
 - **Settings.** `KS_LLM=0` disables the layer. `KS_LLM_MODEL` and `KS_LLM_EFFORT` (default `low`)
-  tune it.
-  - OpenRouter requests use a strict json_schema, `reasoning.exclude`, and
-    `provider.require_parameters`.
-  - The Anthropic backend uses one retry and server-side refusal fallbacks when available.
+  tune it. Requests use a strict json_schema, `reasoning.exclude`, and
+  `provider.require_parameters`.
+- **One provider on purpose.** A second backend (an SDK dependency plus its retry and fallback
+  handling) was removed as unused weight. Another provider only needs its own `_call_*` function.
 
 ## Trade-offs I chose
 
