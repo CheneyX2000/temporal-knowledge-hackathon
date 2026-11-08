@@ -100,7 +100,7 @@ ANSWER_TYPES = [
      re.compile(r"\b\d{1,2}(:\d\d)?\s*(a\.?m\.?|p\.?m\.?)|\bnoon\b", re.I)),
     (re.compile(r"\b(address|located|location of|where is)\b", re.I),
      re.compile(r"\b\d{2,6}\s+[A-Z][A-Za-z.]*(\s+[A-Z][A-Za-z.]*)*\s+(St|Ave|Rd|Ln|Dr|Lane|Street|Avenue|Road|Drive|"
-                r"Blvd|Pkwy|Hwy|Way|Ct|Pl)\b")),
+                r"Blvd|Pkwy|Hwy|Way|Ct|Pl)\b|\bP\.?\s?O\.?\s+Box\s+\d+")),
     (re.compile(r"\b(phone|call|telephone)\b", re.I), re.compile(r"\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}")),
     (re.compile(r"\b(routing|aba)\b", re.I), re.compile(r"\b\d{9}\b")),
     (re.compile(r"\b(fee|fees|cost|costs|charge|charged)\b|\bhow much\b", re.I), re.compile(r"\$\s?\d")),
@@ -202,6 +202,7 @@ _SYN_RAW = {
     "join": "join member membership", "eligible": "eligible join membership",
     "contact": "contact phone call", "university": "college student",
     "share": "share certificate savings",
+    "receive": "receive incoming", "send": "send outgoing domestic", "mailing": "mailing mail address box",
     "wallet": "wallet pay apple google samsung mobile", "wallets": "wallet pay apple google samsung mobile",
 }
 SYN = {stem(k): {stem(x) for x in v.split()} | {stem(k)} for k, v in _SYN_RAW.items()}
@@ -595,10 +596,13 @@ def analyse(q: str) -> QInfo:
     is_rate = bool(RATE_Q_RE.search(qn)) or bool(
         re.search(r"\b(pay|pays|earn|earns)\b", qn, re.I) and
         re.search(r"\b(savings?|certificates?|cds?|checking|money market|ira|club)\b", qn, re.I))
-    specific = bool(months or my or amounts or re.search(r"\b(highest|lowest|best|standard)\b", qn, re.I))
+    specific = bool(months or my or amounts or re.search(r"\b(highest|lowest|best|standard)\b", qn, re.I)
+                    or (re.search(r"\b(fee|cost|charge|how much)\b", qn, re.I) and not RATE_Q_RE.search(qn)))
     is_list = bool(LIST_Q_RE.search(qn)) and not specific
     terms = tokens(negated)
     content = [t for t in content_terms(negated) if t not in GENERIC_S and t not in ("month", "year")]
+    if "ira" in flags:      # IRA rows on the rate sheet are term certificates without saying so
+        content = [t for t in content if t not in ("certif", "cd")]
     return QInfo(qn, terms, content, months, my, amounts, flags, is_rate, is_list, specific)
 
 
@@ -734,7 +738,7 @@ class TemporalKnowledge:
         if not raw:
             return Answer(text=REFUSAL_TEXT, confident=False)
         si = self.snaps.index(snap)
-        counted = self._count_answer(qi, si)
+        counted = self._count_answer(qi, si) or self._recognition_answer(qi, si)
         if counted is not None:
             return counted
         place = re.search(r"\b(?:branch(?:es)?|location|office)s?\s+(?:in|near|at)\s+([A-Z][a-zA-Z]+)", question)
@@ -899,6 +903,8 @@ class TemporalKnowledge:
                     hi = not hi if sup.group(1).lower() == "best" else hi
                 return [max(cand, key=last_pct) if hi else min(cand, key=last_pct)]
         if qi.specific:
+            if not (qi.months or qi.model_year is not None or qi.amounts):
+                return [best]          # nothing to tier by: the single best-matching row
             rows = [u for u, f in fits if f >= best_fit * 0.99]
             if qi.amounts:
                 tiered = [u for u in rows if u.mrange]
@@ -1098,6 +1104,28 @@ class TemporalKnowledge:
                       f"snapshot says {win_c[1]}; older articles and copy still carry earlier figures")
             out.append(Conflict(topic=topic, values=vals, sources=srcs, resolution=win_c[1], reason=reason))
         return out
+
+    def _recognition_answer(self, qi: QInfo, si: int):
+        """'What recognition has Dupaco received from Forbes?' -- the newest dated release's ordinal wins,
+        the same rule conflicts() applies."""
+        org = next((o for o in RECOGNIZERS if o.lower() in qi.text.lower()), None)
+        if org is None or not re.search(r"recogni|award|rank|named|honor|list", qi.text, re.I):
+            return None
+        what = "employer" if re.search(r"employer|workplace|place to work", qi.text, re.I) else "credit union"
+        cache = self._claims_cache.setdefault(si, {})
+        if "claims" not in cache:
+            cache["claims"] = self._claims([si])
+        lst = cache["claims"].get(("ordinal", f"{org} {what}"))
+        if not lst:
+            return None
+        c = self._claim_winner(lst, si)
+        u = c[2]
+        sent = next((m.group(0).strip() for m in ORDINAL_CLAIM_RE.finditer(u.text) if org in m.group(0)), c[1])
+        when = f" ({u.pub_date})" if u.pub_date else ""
+        return Answer(text=f"According to Dupaco's most recent release on this{when}: {sent}.",
+                      sources=[Source(url=u.url, snapshot_id=self.snaps[si][0], quote=sent[:200])],
+                      confident=True,
+                      conflict_note="Older releases give earlier counts; the newest dated release is used.")
 
     def _count_answer(self, qi: QInfo, si: int):
         """'How many branches/employees/members...' -- answered with the same rule conflicts() uses."""
