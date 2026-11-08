@@ -1,10 +1,16 @@
 # NOTES — temporal knowledge system (MVP)
 
 **API keys: optional.** The core is pure Python standard library: deterministic and offline.
-With `ANTHROPIC_API_KEY` set and `anthropic` installed (`requirements.txt`), an optional LLM layer
-composes answers from the same filtered evidence (see "LLM layer" below). This is a **paid API**
-(Claude, default model `claude-opus-5-5`). Without a key, or on any API error, the system falls back to
-the local answer. Ingest of all five snapshots takes ~5 s; local answers take ~20 ms.
+An optional LLM layer composes answers from the same filtered evidence (see "LLM layer" below). It
+uses a **paid API**:
+
+- `OPENROUTER_API_KEY` (preferred). Plain HTTPS from the standard library. Default model is
+  `anthropic/claude-opus-5.5`.
+- `ANTHROPIC_API_KEY`. Requires the `anthropic` package (in `requirements.txt`). Default model is
+  `claude-opus-5-5`.
+
+Keys are read from the environment, or from a git-ignored `.env` file. Without a key, or on any API
+error, the system falls back to the local answer. Ingest of all five snapshots takes ~5 s; local answers take ~20 ms.
 
 ```bash
 python harness/run_eval.py --submission submission --eval eval/public_eval.jsonl
@@ -74,9 +80,11 @@ these rules:
   question. Otherwise the local answer is used. The LLM never sees stale values, so it cannot
   repeat them.
 - **Output.** Structured JSON output: `answer`, `confident`, `source_urls`, `conflict_note`.
-  Answers are cached per (question, as_of) for repeat consistency. The request uses a 20 s timeout,
-  one retry, and server-side refusal fallbacks (`fallbacks: "default"`) when the account supports
-  them.
+  Answers are cached per (question, as_of) for repeat consistency. The request uses a 20 s timeout.
+  - OpenRouter: `response_format` json_schema (strict), `reasoning.effort` with `exclude: true`,
+    and `provider.require_parameters` so the request only goes to providers that honour the schema.
+  - Anthropic SDK: one retry, plus server-side refusal fallbacks (`fallbacks: "default"`) when the
+    account supports them.
 - **Settings.** `KS_LLM=0` disables the layer, `KS_LLM_MODEL` changes the model and
   `KS_LLM_EFFORT` changes the effort (default `low`). A faster model lowers latency for the speed
   score.

@@ -10,9 +10,13 @@ that pre-filtered evidence into a member-facing answer. Three guards keep it saf
   back to the deterministic local answer);
 * answers are cached per (question, as_of), so asking twice gives the same answer.
 
-Enabled only when the `anthropic` package is installed and credentials are configured
-(ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN). Everything degrades to the local answer on any error.
-Environment overrides: KS_LLM=0 disables it, KS_LLM_MODEL picks the model, KS_LLM_EFFORT the effort.
+Backends (first one configured wins):
+  1. OpenRouter  - OPENROUTER_API_KEY; plain HTTPS via the standard library (no extra package).
+  2. Anthropic   - ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN with the `anthropic` package installed.
+With neither, or on any error, the caller keeps the deterministic local answer.
+A `.env` file in the working directory or next to this file is read for these variables (it never
+overrides variables already set). Overrides: KS_LLM=0 disables the layer, KS_LLM_MODEL picks the model,
+KS_LLM_EFFORT the reasoning effort, KS_LLM_TIMEOUT the per-request timeout in seconds.
 """
 from __future__ import annotations
 
@@ -21,9 +25,30 @@ import os
 import re
 from typing import Optional
 
-MODEL = os.getenv("KS_LLM_MODEL", "claude-opus-5-5")
+import urllib.request
+from pathlib import Path
+
+
+def _load_dotenv() -> None:
+    for p in (Path.cwd() / ".env", Path(__file__).resolve().parent / ".env",
+              Path(__file__).resolve().parent.parent / ".env"):
+        try:
+            for line in p.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+        except OSError:
+            continue
+
+
+_load_dotenv()
 EFFORT = os.getenv("KS_LLM_EFFORT", "low")
 TIMEOUT_S = float(os.getenv("KS_LLM_TIMEOUT", "20"))
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+BACKEND = ("openrouter" if os.getenv("OPENROUTER_API_KEY") else
+           "anthropic" if (os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")) else None)
+MODEL = os.getenv("KS_LLM_MODEL", "anthropic/claude-opus-5.5" if BACKEND == "openrouter" else "claude-opus-5-5")
 
 SYSTEM = """You answer credit-union members' questions using ONLY the evidence provided, which comes from \
 the credit union's own website as it stood on a given date. The evidence has already been filtered: \
@@ -82,9 +107,12 @@ def available() -> bool:
     if os.getenv("KS_LLM", "1") == "0":
         _disabled_reason = "disabled by KS_LLM=0"
         return False
-    if not (os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")):
+    if BACKEND is None:
         _disabled_reason = "no credentials"
         return False
+    if BACKEND == "openrouter":
+        _client = "openrouter"
+        return True
     try:
         import anthropic
         _client = anthropic.Anthropic(timeout=TIMEOUT_S, max_retries=1)
@@ -94,8 +122,34 @@ def available() -> bool:
         return False
 
 
-def _call(user: str):
-    """One request; uses server-side refusal fallbacks when the account supports them."""
+def _call_openrouter(user: str) -> Optional[str]:
+    """OpenRouter chat completions; returns the JSON text of the answer, or None."""
+    body = {
+        "model": MODEL,
+        "max_tokens": 4000,
+        "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
+        "response_format": {"type": "json_schema",
+                            "json_schema": {"name": "member_answer", "strict": True, "schema": SCHEMA}},
+        "reasoning": {"effort": EFFORT, "exclude": True},
+        "provider": {"require_parameters": True},
+    }
+    req = urllib.request.Request(
+        OPENROUTER_URL, data=json.dumps(body).encode(), method="POST",
+        headers={"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}",
+                 "Content-Type": "application/json", "X-OpenRouter-Title": "knowledge-takehome"})
+    with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
+        data = json.loads(r.read().decode())
+    choice = (data.get("choices") or [{}])[0]
+    if choice.get("finish_reason") in ("length", "content_filter"):
+        return None
+    content = (choice.get("message") or {}).get("content")
+    if isinstance(content, list):   # some providers return content parts
+        content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+    return content
+
+
+def _call_anthropic(user: str) -> Optional[str]:
+    """Anthropic SDK; uses server-side refusal fallbacks when the account supports them."""
     global _use_fallbacks
     import anthropic
     kwargs = dict(
@@ -107,11 +161,16 @@ def _call(user: str):
     )
     if _use_fallbacks:
         try:
-            return _client.beta.messages.create(
+            resp = _client.beta.messages.create(
                 betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kwargs)
         except (anthropic.BadRequestError, TypeError):
             _use_fallbacks = False      # not supported here: plain request from now on
-    return _client.messages.create(**kwargs)
+            resp = None
+    if not _use_fallbacks or resp is None:
+        resp = _client.messages.create(**kwargs)
+    if getattr(resp, "stop_reason", None) in ("refusal", "max_tokens"):
+        return None
+    return next((b.text for b in resp.content if getattr(b, "type", "") == "text"), None)
 
 
 def compose(question: str, as_of_label: str, evidence: list[dict]) -> Optional[dict]:
@@ -127,15 +186,18 @@ def compose(question: str, as_of_label: str, evidence: list[dict]) -> Optional[d
     user = (f"Website as of: {as_of_label}\n\nEvidence:\n\n" + "\n\n".join(blocks) +
             f"\n\nMember question: {question}")
     try:
-        resp = _call(user)
+        text = _call_openrouter(user) if BACKEND == "openrouter" else _call_anthropic(user)
     except Exception:
         return None
-    if getattr(resp, "stop_reason", None) in ("refusal", "max_tokens"):
-        return None
-    text = next((b.text for b in resp.content if getattr(b, "type", "") == "text"), None)
     try:
         out = json.loads(text or "")
     except Exception:
+        m = re.search(r"\{.*\}", text or "", re.S)     # tolerate prose around the JSON object
+        try:
+            out = json.loads(m.group(0)) if m else None
+        except Exception:
+            out = None
+    if not isinstance(out, dict):
         return None
     ans = (out.get("answer") or "").strip()
     if not ans:
