@@ -10,7 +10,10 @@
     public-eval run costs about $0.002–0.006.
   - Without a key, or on any error, the system uses the local answer.
 - Ingest of the five snapshots takes about 6 s. Local answers take about 20 ms (p95 under 0.2 s). Checked on
-  Python 3.11 from a fresh clone.
+  Python 3.11 from a fresh clone, after copying the snapshot data in.
+- The snapshot data (`snapshots_zip/` and the unpacked folders) is gitignored because the kit says not to
+  redistribute it. Copy it into a fresh clone before running the eval: without it nothing is ingested, every
+  answer is a refusal, and the score is about 0.09 with no error.
 
 ```bash
 python harness/run_eval.py --submission submission --eval eval/public_eval.jsonl   # score

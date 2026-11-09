@@ -31,7 +31,6 @@ class TemporalKnowledge(ConflictsMixin):
         self._cache: dict = {}
         self._conflicts = None
         self._known_pages: dict = {}
-        self._llm_ctx = None
         self._claims_cache: dict = {}
 
     # ---------------------------------------------------------------- ingest
@@ -132,10 +131,10 @@ class TemporalKnowledge(ConflictsMixin):
         key = (question.strip().lower(), as_of)
         if key in self._cache:
             return self._cache[key]
-        self._llm_ctx = None
-        ans = self._answer(question, as_of)
-        if self._llm_ctx is not None:
-            evidence, label, local = self._llm_ctx
+        ans, llm_ctx = self._answer(question, as_of)
+        if llm_ctx is not None:          # (evidence, snapshot label): prose answer the LLM may rephrase
+            evidence, label = llm_ctx
+            local = ans
             out = llm.compose(question, label, evidence)
             if out is not None:
                 srcs = [Source(url=u, snapshot_id=local.sources[0].snapshot_id if local.sources else None)
@@ -146,22 +145,23 @@ class TemporalKnowledge(ConflictsMixin):
         return ans
 
     def _answer(self, question: str, as_of: Optional[str]):
+        """Local answer plus LLM context (evidence, snapshot label), or None when it stays local."""
         snap = self._pick_snapshot(as_of)
         if snap is None:
-            return Answer(text=REFUSAL_TEXT, confident=False)
+            return Answer(text=REFUSAL_TEXT, confident=False), None
         sid, taken_on, idx = snap
         qi = analyse(question)
         raw = idx.search(expand(qi.terms))
         if not raw:
-            return Answer(text=REFUSAL_TEXT, confident=False)
+            return Answer(text=REFUSAL_TEXT, confident=False), None
         si = self.snaps.index(snap)
         counted = self._count_answer(qi, si) or self._recognition_answer(qi, si)
         if counted is not None:
-            return counted
+            return counted, None
         place = re.search(r"\b(?:branch(?:es)?|location|office)s?\s+(?:in|near|at)\s+([A-Z][a-zA-Z]+)", question)
         if place and not any(u.ptype == "contact" and place.group(1) in u.text for u in idx.units):
             return Answer(text=f"I couldn't find a Dupaco branch in {place.group(1)} on the website's location "
-                               "list. Please contact Dupaco to confirm the nearest location.", confident=False)
+                               "list. Please contact Dupaco to confirm the nearest location.", confident=False), None
         how_many = re.search(r"\bhow many\s+([a-z]+)", qi.text.lower())
         count_re = None
         if how_many:
@@ -213,7 +213,7 @@ class TemporalKnowledge(ConflictsMixin):
                 mult *= 1.5      # the contact page is the authority for phone / address / routing
             scored.append((s * mult, i))
         if not scored:
-            return Answer(text=REFUSAL_TEXT, confident=False)
+            return Answer(text=REFUSAL_TEXT, confident=False), None
         scored.sort(key=lambda x: (-x[0], x[1]))
         best_s, best_i = scored[0]
         best = idx.units[best_i]
@@ -226,13 +226,13 @@ class TemporalKnowledge(ConflictsMixin):
                         and not (SYN.get(t, set()) & tf.keys())]
         need = 0.7 if value_q else 0.45
         if cov < need or missing_rare:
-            return Answer(text=REFUSAL_TEXT, confident=False)
+            return Answer(text=REFUSAL_TEXT, confident=False), None
 
         if best.kind == "row" and qi.amounts and best.mrange is None:
             table = [u for u in idx.units if u.table_id == best.table_id and u.url == best.url and u.mrange]
             his = [u.mrange[1] for u in table]
             if his and max(qi.amounts) > max(his):      # e.g. a $1.5M loan when tiers stop at $832,750
-                return Answer(text=REFUSAL_TEXT, confident=False)
+                return Answer(text=REFUSAL_TEXT, confident=False), None
         if best.kind == "row":
             rows = self._select_rows(idx, scored, best, qi)
             text = self._format_rows(rows)
@@ -261,22 +261,24 @@ class TemporalKnowledge(ConflictsMixin):
         # local. The LLM only composes prose answers (hours, programs, eligibility...), where
         # extractive chunks are weakest, from the same current, non-stale evidence.
         if best.kind == "row":
-            return local
-        self._llm_ctx = (self._evidence(idx, scored), f"{taken_on} (snapshot {sid})", local)
-        return local
+            return local, None
+        return local, (self._evidence(idx, scored), f"{taken_on} (snapshot {sid})")
 
     @staticmethod
     def _trim_to_shape(text: str, shapes) -> str:
         """Keep the lines that carry the asked-for value (plus their labels: "Lobby", "Sunday: Closed",
         "Branch hours are:"), so an extractive answer doesn't drag in unrelated numbers from the chunk."""
-        lines = [l.strip() for l in text.split("\n")]
-        hit = lambda l: any(sh.search(l) for sh in shapes)
+        lines = [ln.strip() for ln in text.split("\n")]
+
+        def hit(line: str) -> bool:
+            return any(sh.search(line) for sh in shapes)
+
         keep = set()
-        for i, l in enumerate(lines):
-            if not hit(l):
+        for i, line in enumerate(lines):
+            if not hit(line):
                 continue
-            if len(l) > 220:        # a paragraph: keep only the sentence(s) carrying the value
-                sents = [s for s in re.split(r"(?<=[.!?])\s+", l) if hit(s)]
+            if len(line) > 220:        # a paragraph: keep only the sentence(s) carrying the value
+                sents = [s for s in re.split(r"(?<=[.!?])\s+", line) if hit(s)]
                 lines[i] = " ".join(sents[:2])
             keep.add(i)
             j = i - 1           # walk back over labels / "closed" days directly above
@@ -351,8 +353,8 @@ class TemporalKnowledge(ConflictsMixin):
             if qi.amounts:
                 tiered = [u for u in rows if u.mrange]
                 if tiered:      # "$100,000 or less" fits every "or less" tier: keep the narrowest one
-                    w = lambda u: (u.mrange[1] if u.mrange[1] != float("inf") else 1e15) - u.mrange[0]
-                    rows = [u for u in tiered if w(u) == min(w(x) for x in tiered)]
+                    widths = [(u.mrange[1] if u.mrange[1] != float("inf") else 1e15) - u.mrange[0] for u in tiered]
+                    rows = [u for u, wd in zip(tiered, widths) if wd == min(widths)]
             return rows[:6] or [best]
         rows = [u for u, f in fits][:12]
         if qi.is_list:

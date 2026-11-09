@@ -8,7 +8,8 @@ from typing import Optional
 from urllib.parse import urlparse
 import re
 
-from .text import DATE_RE, FLAGS, METRIC_WORD_RE, MONEY_RE, MONTHS, PCT_RE, model_year_range, money_range, norm_text, terms_months
+from .text import (DATE_RE, FLAGS, METRIC_WORD_RE, MONEY_RE, MONTHS, PCT_RE, model_year_range, money_range,
+                   norm_text, terms_months)
 
 
 def page_type(url: str) -> tuple[str, float]:
@@ -27,15 +28,15 @@ def page_type(url: str) -> tuple[str, float]:
         return "pdf", 0.4
     if path.startswith("/newsroom"):
         return "news", 0.55
-    if path.startswith("/learn") or re.match(r"^/(19|20)\d\d/", path) or path.startswith("/dupacodaily") \
-            or path.startswith("/business/resources") or path.startswith("/resources"):
+    if path.startswith(("/learn", "/dupacodaily", "/business/resources", "/resources")) \
+            or re.match(r"^/(19|20)\d\d/", path):
         return "blog", 0.4
-    if path.endswith("-lp") or re.search(r"/(promo|promotions?|offers?)(/|$)", path) or path in ("/switch-and-earn", "/earn-more", "/offer-expired", "/makethemost-lp",
-                                        "/homebuying-guidance", "/mortgage-refi", "/money-makeover"):
+    if path.endswith("-lp") or re.search(r"/(promo|promotions?|offers?)(/|$)", path) or path in (
+            "/switch-and-earn", "/earn-more", "/offer-expired", "/makethemost-lp",
+            "/homebuying-guidance", "/mortgage-refi", "/money-makeover"):
         return "landing", 0.45
-    if path.startswith("/personal") or path.startswith("/business") or path.startswith("/about") \
-            or path in ("/contact", "/checking", "/loans", "/membership", "/personal-loans") \
-            or path.startswith("/connect") or path.startswith("/online-and-mobile-banking"):
+    if path.startswith(("/personal", "/business", "/about", "/connect", "/online-and-mobile-banking")) \
+            or path in ("/contact", "/checking", "/loans", "/membership", "/personal-loans"):
         return ("contact" if path == "/contact" else "product"), 0.85
     return "other", 0.65
 
@@ -143,7 +144,7 @@ def split_page(url: str, title: str, md: str, fetched_at: str, table_counter: li
             header = [c.strip() for c in s.strip("|").split("|")]
             table_counter[0] += 1
             tid = table_counter[0]
-            ctx = " / ".join(recent_heads[-1:] + [l for l in labels[-3:] if l not in recent_heads[-1:]])
+            ctx = " / ".join(recent_heads[-1:] + [lb for lb in labels[-3:] if lb not in recent_heads[-1:]])
             labels.clear()
             i += 2
             while i < len(lines) and lines[i].strip().startswith("|"):
@@ -180,9 +181,7 @@ def split_page(url: str, title: str, md: str, fetched_at: str, table_counter: li
         else:
             # a long paragraph stands alone; runs of short lines (hours, addresses, lists) are merged
             size = sum(len(b) for b in buf)
-            if len(s) > 160 and size > 0 and (size > 160 or len(buf) > 2):
-                flush()
-            elif size + len(s) > 700:
+            if (len(s) > 160 and size > 0 and (size > 160 or len(buf) > 2)) or size + len(s) > 700:
                 flush()
             if _is_label(s):
                 labels.append(s.strip("*: "))

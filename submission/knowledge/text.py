@@ -88,8 +88,7 @@ def norm_question(q: str) -> str:
 def norm_text(s: str) -> str:
     s = s.replace("–", "-").replace("—", "-").replace("\\r\\n", " ").replace("\\n", " ")
     s = FOOTNOTE_RE.sub(r"\1", s)
-    s = re.sub(r"\\([*_$#|])", r"\1", s)
-    return s
+    return re.sub(r"\\([*_$#|])", r"\1", s)
 
 
 def stem(t: str) -> str:

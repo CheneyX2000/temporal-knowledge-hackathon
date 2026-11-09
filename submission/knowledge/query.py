@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from typing import Optional
 import re
 
-from .text import FLAGS, GENERIC_S, MONEY_RE, content_terms, money_value, norm_question, norm_text, stem, terms_months, tokens
+from .text import (FLAGS, GENERIC_S, MONEY_RE, content_terms, money_value, norm_question, norm_text, stem,
+                   terms_months, tokens)
 
 
 # Answer-type detection: what the answer must *look like* for a given kind of question.
@@ -55,8 +56,8 @@ def analyse(q: str) -> QInfo:
         ym = re.search(r"\b(19[89]\d|20[0-3]\d)\b", qn)
         my = int(ym.group(1)) if ym else None
     amounts = [money_value(m) for m in MONEY_RE.finditer(qn)]
-    negated = re.sub(r"\b(not|non|no|excluding|without)[\s-]+(a\s+|the\s+)?(jumbo|ira|business|special|intro)\b", " ", qn,
-                     flags=re.I)
+    negated = re.sub(r"\b(not|non|no|excluding|without)[\s-]+(a\s+|the\s+)?(jumbo|ira|business|special|intro)\b",
+                     " ", qn, flags=re.I)
     flags = {k for k, rx in FLAGS.items() if rx.search(negated)}
     is_rate = bool(RATE_Q_RE.search(qn)) or bool(
         re.search(r"\b(pay|pays|earn|earns)\b", qn, re.I) and

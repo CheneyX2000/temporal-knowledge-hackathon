@@ -68,6 +68,10 @@ def _vehicle_family(u: Unit) -> str:
     return ""
 
 
+def _col_value(value: str, col: str) -> str:
+    """'5.39%' + 'apr' -> '5.39% APR'; the plain rate column adds no label."""
+    return f"{value} {col.upper() if col in ('apr', 'apy') else col}".strip()
+
 def _hyphen_terms(s: str) -> str:
     """'60 months' -> '60-month', so a topic reads the way members (and keyword lists) write terms."""
     return re.sub(r"\b(\d+)\s+(month|year)s?\b", r"\1-\2", s)
@@ -115,8 +119,12 @@ class ConflictsMixin:
                     if not m:
                         continue
                     col = re.sub(r"[^a-z ]", "", h.lower()).strip()
-                    col = "apy" if "yield" in col or "apy" in col else ("apr" if "apr" in col or "annual percentage rate"
-                                                                      in col else ("rate" if "rate" in col else col))
+                    if "yield" in col or "apy" in col:
+                        col = "apy"
+                    elif "apr" in col or "annual percentage rate" in col:
+                        col = "apr"
+                    elif "rate" in col:
+                        col = "rate"
                     obs[k][col].append((m.group(1) + "%", u, si))
         latest = len(self.snaps) - 1
         out = []
@@ -136,14 +144,14 @@ class ConflictsMixin:
                 win_v = next((v for v, u, _ in lst if u is win_u), None)
                 if win_v is None or len({v for v, _, _ in lst}) < 2:
                     if win_v is not None:
-                        res_parts.append(f"{win_v} {col.upper() if col in ('apr', 'apy') else col}".strip())
+                        res_parts.append(_col_value(win_v, col))
                     continue
                 others = sorted({v for v, _, _ in lst if v != win_v}, key=lambda x: float(x[:-1]))
                 # keep it a single-product conflict: skip columns with many distinct values (table drift)
                 if len(others) > 8:
                     continue
                 changed.append(col)
-                res_parts.append(f"{win_v} {col.upper() if col in ('apr', 'apy') else col}".strip())
+                res_parts.append(_col_value(win_v, col))
                 values += [v for v in [win_v] + others if v not in values]
                 losers += [(v, u, si) for v, u, si in lst if v != win_v]
             if not changed:
@@ -247,7 +255,7 @@ class ConflictsMixin:
             win_c = self._claim_winner(lst, latest)
             win = win_c[0]
             vals, seen = [win_c[1]], {win}
-            for v, disp, u, si in sorted(lst, key=lambda c: c[2].pub_date or "", reverse=True):
+            for v, disp, _u, _si in sorted(lst, key=lambda c: c[2].pub_date or "", reverse=True):
                 if v not in seen and len(vals) < 6:
                     seen.add(v)
                     vals.append(disp)

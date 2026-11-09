@@ -24,7 +24,7 @@ class Index:
         # a table's footnotes/links may vouch for what the table is (coverage), but never rank it
         self.max_idf = max(self.idf.values(), default=1.0)
         self.cap = [set(tokens(u.caption)) if u.caption else set() for u in units]
-        self.avgdl = sum(l for _, l in self.docs) / n
+        self.avgdl = sum(dl for _, dl in self.docs) / n
         self.post = defaultdict(list)
         for i, (tf, _) in enumerate(self.docs):
             for t in tf:
@@ -52,8 +52,8 @@ class Index:
         if self.cap[i]:
             tf = dict.fromkeys(set(tf) | self.cap[i], 1)
         q_terms = [t for t in q_terms if t in self.idf or t not in names]
-        w = lambda t: self.idf.get(t, self.max_idf)
-        tot = sum(w(t) for t in q_terms) or 1.0
-        hit = sum(w(t) for t in q_terms if t in tf or (SYN.get(t, set()) & tf.keys())
+        idf, max_idf = self.idf, self.max_idf
+        tot = sum(idf.get(t, max_idf) for t in q_terms) or 1.0
+        hit = sum(idf.get(t, max_idf) for t in q_terms if t in tf or (SYN.get(t, set()) & tf.keys())
                   or (len(t) >= 4 and any(k.startswith(t) for k in tf)))     # "intro" ~ "introductory"
         return hit / tot if q_terms else 1.0

@@ -19,7 +19,7 @@ from knowledge.system import TemporalKnowledge  # noqa: E402
 #   index.py    per-snapshot BM25 + query coverage
 #   claims.py   conflicts() and claim-based answers (counts, recognitions)
 #   system.py   ingest / answer / snapshot selection / staleness / honesty gate
-#   llm.py      optional answer composer (OpenRouter or Anthropic), grounded and cached
+#   llm.py      optional answer composer (OpenRouter), grounded and cached
 #   contract.py harness contract types (or identical local copies)
 
 
