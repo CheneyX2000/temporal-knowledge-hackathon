@@ -1,3 +1,23 @@
+> **My submission is in [`submission/`](submission/).** Start with [`submission/NOTES.md`](submission/NOTES.md):
+> it covers how the system decides what is current, picks the right tier, refuses, finds conflicts, and the
+> trade-offs behind those choices.
+>
+> - No packages are needed (standard library only). An optional LLM layer uses a paid OpenRouter key; without
+>   one, the system runs fully offline and deterministically.
+> - The website snapshots are not in this repo (the kit says not to redistribute them). Copy `snapshots_zip/`
+>   from the kit into the repo root, then run:
+>
+> ```bash
+> python harness/run_eval.py --submission submission --eval eval/public_eval.jsonl   # about 0.84 offline
+> python -m unittest discover -s submission/tests
+> ```
+>
+> - `dev/` holds the extra question sets I wrote to check generalization (holdout and two blind sets).
+>
+> Everything below is the original kit README.
+
+---
+
 # Hackathon: Build a Knowledge System That Knows What's True *Now*
 
 ## The problem in one minute
